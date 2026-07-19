@@ -1,0 +1,32 @@
+# ── Original Little Fighter 2 game data — NEVER commit ───────────────────────
+# The .dat files and sprites are © Marti Wong / Starsky Wong. The engine is
+# ours; the game data is not. Users must supply their own copy of LF2.
+data/
+sprite/
+bg/
+*.dat
+!sce_sys/**/*.dat
+
+# ── Build artifacts ──────────────────────────────────────────────────────────
+build/
+build-out/
+cmake-build-*/
+*.o
+*.a
+*.elf
+*.self
+*.vpk
+*.velf
+
+# ── Host tools binaries ──────────────────────────────────────────────────────
+/datdump
+/test_dat
+bin/
+
+# ── Editor / OS ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,42 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Host-side build — parser tools & tests. Nothing here targets the Vita;
+#  use CMakeLists.txt + VitaSDK for the actual game build.
+#
+#    make -f Makefile.host test      run the parser test suite
+#    make -f Makefile.host tools     build bin/datdump
+#    make -f Makefile.host scan      validate every data/*.dat file
+# ─────────────────────────────────────────────────────────────────────────────
+CXX      ?= g++
+CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -I src
+BIN      := bin
+
+.PHONY: all test tools scan clean
+
+all: tools test
+
+$(BIN):
+	@mkdir -p $(BIN)
+
+tools: $(BIN)/datdump
+
+$(BIN)/datdump: tools/datdump.cpp src/engine/dat.hpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+$(BIN)/test_dat: tests/test_dat.cpp src/engine/dat.hpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+test: $(BIN)/test_dat
+	@./$(BIN)/test_dat
+
+# Runs the validator over the original game files (if present) and reports
+# only hard errors. Warnings are quirks of the original data, not bugs.
+scan: $(BIN)/datdump
+	@if [ ! -d data ]; then echo "no data/ folder — nothing to scan"; exit 0; fi; \
+	fail=0; \
+	for f in data/*.dat; do \
+	  ./$(BIN)/datdump "$$f" --validate || fail=1; \
+	done; \
+	echo "--- scan finished (exit $$fail)"
+
+clean:
+	rm -rf $(BIN)

@@ -32,6 +32,12 @@ vita_create_self(${PROJECT_NAME}.self ${PROJECT_NAME})
 vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   VERSION ${VITA_VERSION}
   NAME    ${VITA_APP_NAME}
+  # Icon + Live Area (these exist in sce_sys/ but were never packaged, so the
+  # app showed the default placeholder icon on the Vita's home screen)
+  FILE sce_sys/icon0.png                      sce_sys/icon0.png
+  FILE sce_sys/livearea/contents/bg.png       sce_sys/livearea/contents/bg.png
+  FILE sce_sys/livearea/contents/startup.png  sce_sys/livearea/contents/startup.png
+  FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
   FILE assets/dennis_0.png assets/dennis_0.png
   FILE assets/dennis_1.png assets/dennis_1.png
   FILE assets/firen_0.png  assets/firen_0.png
