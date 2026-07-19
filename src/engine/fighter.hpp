@@ -188,6 +188,25 @@ struct Fighter {
         return true;
     }
 
+    // Sheet ORDINAL (0,1,2… in header declaration order) + the pic's local index
+    // within it. The render layer maps the ordinal to a loaded texture and lays
+    // the cell out on the PNG export's own grid. NOTE: the shipped LF2 PNGs are
+    // exported on an 80 px grid (800-wide = 10×80), even though the .dat declares
+    // 79 px cells — so the renderer must stride by the texture grid, not by
+    // SpriteSheet::pixelOf(). This is what fixes the old pic>=100 boundary bug
+    // (real sheet splits are 0-69 / 70-139 / 140-209).
+    bool sheetLocal(int& ordinal, int& local) const {
+        if (!data) return false;
+        int p = pic();
+        for (size_t i = 0; i < data->header.files.size(); ++i)
+            if (data->header.files[i].contains(p)) {
+                ordinal = (int)i;
+                local   = p - data->header.files[i].startPic;
+                return true;
+            }
+        return false;
+    }
+
     // Top-left where the sprite should be blitted, given the anchor at (x,y).
     // Facing left, the renderer mirrors the sprite, so the origin shifts by the
     // mirrored center: drawX = x - (sheetW - centerx).

@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>   // fabsf (separateX) — keeps this header SDL-free / host-buildable
 
 // ── Screen / Map ──────────────────────────────────────────────────────────────
 constexpr int   SCREEN_W   = 960;
@@ -29,7 +30,7 @@ constexpr int     BTN_LEFT   = 7;
 constexpr int     BTN_RIGHT  = 9;
 constexpr int     BTN_ATTACK = 2;
 constexpr int     BTN_JUMP   = 1;
-constexpr Sint16  DEADZONE   = 8000;
+constexpr int     DEADZONE   = 8000;   // compared against SDL_JoystickGetAxis (Sint16)
 
 // ── Hit detection ─────────────────────────────────────────────────────────────
 struct Box { int x, y, w, h; };
