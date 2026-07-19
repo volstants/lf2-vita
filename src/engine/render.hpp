@@ -6,10 +6,14 @@
 // ── Texture loader ────────────────────────────────────────────────────────────
 // colorKey=true  → magenta (255,0,128) is transparent (character sprites)
 // colorKey=false → opaque  (background tiles)
-inline SDL_Texture* loadTex(SDL_Renderer* r, const char* path, bool colorKey = true) {
+// Transparent color defaults to LF2's magenta (255,0,128), but some sheets were
+// exported with a different key — e.g. firen_0.png uses pure black — so the key
+// is overridable per texture.
+inline SDL_Texture* loadTex(SDL_Renderer* r, const char* path, bool colorKey = true,
+                            Uint8 kr = 255, Uint8 kg = 0, Uint8 kb = 128) {
     SDL_Surface* s = IMG_Load(path);
     if (!s) return nullptr;
-    if (colorKey) SDL_SetColorKey(s, SDL_TRUE, SDL_MapRGB(s->format, 255, 0, 128));
+    if (colorKey) SDL_SetColorKey(s, SDL_TRUE, SDL_MapRGB(s->format, kr, kg, kb));
     SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
     SDL_FreeSurface(s);
     return t;

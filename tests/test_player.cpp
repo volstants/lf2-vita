@@ -73,6 +73,32 @@ int main() {
     CHECK(p.grounded(),                  "gravity returns the jump to the ground");
     CHECK(p.state() == lf2::ST_STANDING, "landing returns to standing");
 
+    // ── Double-tap to run ────────────────────────────────────────────────────
+    p.f.setFrame(lf2::fid::STANDING, false);
+    p.right = true; p.prevL = p.prevR = false; p.tapDir = 0; p.tapTimer = 0;
+    p.tick(false, true, false, false, false, false);   // tap 1
+    p.tick(false, false, false, false, false, false);  // release
+    float rx = p.x;
+    p.tick(false, true, false, false, false, false);   // tap 2 → run
+    CHECK(p.state() == lf2::ST_RUNNING, "double-tap R enters running (state 2)");
+    p.tick(false, true, false, false, false, false);   // run stride
+    CHECK(p.x > rx + p.walkSpeed, "running covers more ground than walking");
+    // Walking animation actually cycles through frames 5..8 (not stuck on 5).
+    p.f.setFrame(lf2::fid::STANDING, false); p.prevR = false; p.tapDir = 0;
+    bool advanced = false;
+    for (int i = 0; i < 12; ++i) {
+        p.tick(false, true, false, false, false, false);
+        if (p.f.frameId > lf2::fid::WALKING && p.f.frameId <= lf2::fid::WALK_LAST) advanced = true;
+    }
+    CHECK(advanced, "walking cycles past frame 5 (animation not frozen)");
+
+    // Running jump = dash (state 5), a faster forward leap than a normal jump.
+    p.f.setFrame(lf2::fid::RUNNING, false);
+    p.right = true; p.h = 0.f; p.vy = 0.f;
+    p.tick(false, true, false, false, false, true);    // run + jump
+    CHECK(p.state() == lf2::ST_DASH,     "running jump enters dash (state 5)");
+    CHECK(!p.grounded() && p.f.vx > p.jumpDist, "dash leaps faster forward than a jump");
+
     // ── Combat reactions ─────────────────────────────────────────────────────
     auto reset = [&]() {
         p.f.hp = p.f.maxHp; p.h = 0.f; p.vy = 0.f; p.knockedDown = false;

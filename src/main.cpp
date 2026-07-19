@@ -103,18 +103,20 @@ struct Textures {
 
     void load(SDL_Renderer* r) {
         forests  = loadTex(r, "app0:/assets/forests.png",  false);
-        forestm1 = loadTex(r, "app0:/assets/forestm1.png");
-        forestm2 = loadTex(r, "app0:/assets/forestm2.png");
-        forestm3 = loadTex(r, "app0:/assets/forestm3.png");
-        forestm4 = loadTex(r, "app0:/assets/forestm4.png");
-        foresett = loadTex(r, "app0:/assets/forestt.png");
+        // These forest layers ship with BLACK transparent backgrounds (not the
+        // magenta the character sheets use), so they need a black color key.
+        forestm1 = loadTex(r, "app0:/assets/forestm1.png", true, 0, 0, 0);
+        forestm2 = loadTex(r, "app0:/assets/forestm2.png", true, 0, 0, 0);
+        forestm3 = loadTex(r, "app0:/assets/forestm3.png", true, 0, 0, 0);
+        forestm4 = loadTex(r, "app0:/assets/forestm4.png", true, 0, 0, 0);
+        foresett = loadTex(r, "app0:/assets/forestt.png",  true, 0, 0, 0);
         land1    = loadTex(r, "app0:/assets/land1.png",    false);
         land2    = loadTex(r, "app0:/assets/land2.png",    false);
         land4    = loadTex(r, "app0:/assets/land4.png",    false);
         charSheet[0] = loadTex(r, "app0:/assets/dennis_0.png");
         charSheet[1] = loadTex(r, "app0:/assets/dennis_1.png");
         charSheet[2] = loadTex(r, "app0:/assets/dennis_2.png");
-        enemyTex     = loadTex(r, "app0:/assets/firen_0.png");
+        enemyTex     = loadTex(r, "app0:/assets/firen_0.png", true, 0, 0, 0); // black key
         shadow       = loadTex(r, "app0:/assets/s.png",    false);
     }
 };
@@ -357,21 +359,12 @@ int main(int, char*[]) {
                 }
 
                 // ── Body separation ───────────────────────────────────────────
-                Box pSep;
-                bool playerSeparable = player.alive() &&
-                    player.state() != lf2::ST_FALLING &&
-                    player.state() != lf2::ST_LYING &&
-                    playerBody(player, pSep);
+                // LF2 characters do NOT block each other's movement — you walk,
+                // run and jump straight through, just like the original and F.LF.
+                // So the player is never pushed by enemies. Enemies still nudge
+                // apart from EACH OTHER so the trio doesn't collapse into one
+                // sprite while chasing.
                 auto enemySeparable = [](St s) { return s != St::DEAD && s != St::FALL; };
-
-                if (playerSeparable) {
-                    for (int i = 0; i < NUM_ENEMIES; i++) {
-                        if (enemySeparable(enemies[i].state)) {
-                            separateX(player.x, player.z, pSep,
-                                      enemies[i].x, enemies[i].z, FIREN_BDY);
-                        }
-                    }
-                }
                 for (int i = 0; i < NUM_ENEMIES; i++)
                 for (int j = i + 1; j < NUM_ENEMIES; j++) {
                     if (enemySeparable(enemies[i].state) && enemySeparable(enemies[j].state))

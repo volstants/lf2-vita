@@ -21,10 +21,13 @@ namespace lf2 {
 // Canonical LF2 frame ids — a 20-year-old community convention every character
 // .dat obeys (verified against dennis.dat via datdump).
 namespace fid {
-    constexpr int STANDING = 0;    // 0-3
-    constexpr int WALKING  = 5;    // 5-8
-    constexpr int RUNNING  = 9;    // 9-11
-    constexpr int PUNCH    = 60;   // basic attack
+    constexpr int STANDING  = 0;   // 0-3
+    constexpr int WALKING   = 5;   // 5-8
+    constexpr int WALK_LAST = 8;
+    constexpr int RUNNING   = 9;   // 9-11
+    constexpr int RUN_LAST  = 11;
+    constexpr int PUNCH      = 60; // basic attack
+    constexpr int RUN_ATTACK = 85; // running attack
     constexpr int JUMP     = 210;  // 210-212
     constexpr int DASH     = 213;  // 213-217
     constexpr int DEFEND   = 110;  // 110-111
@@ -45,19 +48,40 @@ struct Player {
     bool  right = true;
     bool  knockedDown = false; // in a heavy-hit fall→lie sequence
 
+    // Input edge / double-tap-to-run tracking.
+    bool  prevL = false, prevR = false;
+    int   tapDir = 0, tapTimer = 0;
+    static constexpr int RUN_TAP_WINDOW = 9;   // ticks to land the 2nd tap (~0.3s)
+
+    // Locomotion animation cursor (walking/running cycle their own frames; the
+    // frame-graph `next` only handles idle/attacks).
+    int   animTimer = 0;
+
     // Stats pulled from the character header (fall back to Dennis defaults).
     float walkSpeed  = 5.0f;
     float walkSpeedZ = 2.5f;
+    float runSpeed   = 10.5f;
+    float runSpeedZ  = 1.65f;
+    int   walkRate   = 3;      // ticks per walking frame
+    int   runRate    = 3;      // ticks per running frame
     float jumpVy     = -16.3f;
     float jumpDist   = 10.0f;
+    float dashDist   = 18.0f;  // running-jump (dash) horizontal speed
+    float dashVy     = -10.0f; // dash lift (lower/faster than a jump)
 
     // ── Setup ────────────────────────────────────────────────────────────────
     void load(const dat::File* d) {
         f.load(d);
         walkSpeed  = d->header.get("walking_speed",   5.0f);
         walkSpeedZ = d->header.get("walking_speedz",  2.5f);
+        runSpeed   = d->header.get("running_speed",  10.5f);
+        runSpeedZ  = d->header.get("running_speedz",  1.65f);
+        walkRate   = (int)d->header.get("walking_frame_rate", 3.f);
+        runRate    = (int)d->header.get("running_frame_rate", 3.f);
         jumpVy     = d->header.get("jump_height",    -16.3f);
         jumpDist   = d->header.get("jump_distance",   10.0f);
+        dashDist   = d->header.get("dash_distance",   18.0f);
+        dashVy     = d->header.get("dash_height",    -10.0f);
         f.setFrame(fid::STANDING, /*applyDv=*/false);
         syncAnchor();
     }
@@ -92,63 +116,57 @@ struct Player {
 
     // ── Per-tick update (run at 30 Hz) ───────────────────────────────────────
     void tick(bool L, bool R, bool U, bool D, bool atk, bool jmp) {
-        // Airborne physics take over whenever off the ground, INDEPENDENT of the
-        // animation state — jump frames can cycle to standing (next:999) mid-arc,
-        // so grounding must be decided by h, not by the frame's state, or the
-        // actor freezes floating.
-        if (!grounded()) {
-            vy += GRAVITY;
-            h  += vy;
-            x  += f.vx;
-            if (!knockedDown) {                 // no air-steering while knocked down
-                if (U) z -= walkSpeedZ * 0.75f;
-                if (D) z += walkSpeedZ * 0.75f;
-            }
-            clampPos();
-            if (grounded()) {                   // landed this tick
-                h = 0.f; vy = 0.f; f.vx = 0.f;
-                f.setFrame(knockedDown ? fid::LYING : fid::STANDING);
-            } else if (!knockedDown) {
-                f.advance();                    // jumps animate; a knockdown holds its frame
-            }
-            syncAnchor();
-            return;
-        }
+        // Input edge + double-tap bookkeeping (every tick).
+        bool newL = L && !prevL, newR = R && !prevR;
+        prevL = L; prevR = R;
+        if (tapTimer > 0) --tapTimer;
+
+        if (!grounded()) { airborneTick(U, D); syncAnchor(); return; }
 
         int s = f.state();
 
-        // Lying: dead → pinned; alive → let it animate up (230 → 219 → standing).
+        // Lying: dead → pinned; alive → animate up (230 → 219 → standing).
         if (s == ST_LYING) {
             if (f.hp > 0) { f.advance(); if (f.state() != ST_LYING) knockedDown = false; }
             syncAnchor();
             return;
         }
 
+        // Running has its own control + animation cycle.
+        if (s == ST_RUNNING) { runTick(L, R, U, D, atk, jmp); syncAnchor(); return; }
+
         if (s == ST_STANDING || s == ST_WALKING) {
-            if (atk)      { f.setFrame(fid::PUNCH); }        // → state 3
-            else if (jmp) { startJump(L || R); }            // → state 4 (h<0 next tick)
+            if (atk)      { f.setFrame(fid::PUNCH); }
+            else if (jmp) { startJump(L || R); }
             else {
                 if (L) right = false;
                 if (R) right = true;
-                bool moving = L || R || U || D;
-                if (moving) {
-                    if (L) x -= walkSpeed;
-                    if (R) x += walkSpeed;
-                    if (U) z -= walkSpeedZ;
-                    if (D) z += walkSpeedZ;
-                    clampPos();
-                    if (s != ST_WALKING) f.setFrame(fid::WALKING);
-                    f.advance();
-                } else {
-                    if (s != ST_STANDING) f.setFrame(fid::STANDING);
-                    f.advance();
+
+                // Double-tap the facing direction within the window → run.
+                if      (newR && tapDir ==  1 && tapTimer > 0) { enterRun(); }
+                else if (newL && tapDir == -1 && tapTimer > 0) { enterRun(); }
+                else {
+                    if (newR) { tapDir =  1; tapTimer = RUN_TAP_WINDOW; }
+                    if (newL) { tapDir = -1; tapTimer = RUN_TAP_WINDOW; }
+
+                    bool moving = L || R || U || D;
+                    if (moving) {
+                        if (L) x -= walkSpeed;
+                        if (R) x += walkSpeed;
+                        if (U) z -= walkSpeedZ;
+                        if (D) z += walkSpeedZ;
+                        clampPos();
+                        cycleAnim(fid::WALKING, fid::WALK_LAST, walkRate);  // 5→8 loop
+                    } else {
+                        if (s != ST_STANDING) f.setFrame(fid::STANDING);
+                        f.advance();                                       // idle via next-graph
+                    }
                 }
             }
         }
         else {
             // attack / dash / defend / injured …: drift by the frame's own dv
-            // (set on entry, carried by the KEEP rule) and animate back to
-            // standing via the frame graph's next:999.
+            // and animate back to standing via the frame graph's next:999.
             x += f.vx;
             clampPos();
             f.advance();
@@ -156,6 +174,62 @@ struct Player {
 
         syncAnchor();
     }
+
+    // ── Airborne integration (jump + knockdown) ──────────────────────────────
+    // Physics take over whenever off the ground, INDEPENDENT of the animation
+    // state — jump frames can cycle to standing (next:999) mid-arc, so grounding
+    // is decided by h, not by the frame's state, or the actor freezes floating.
+    void airborneTick(bool U, bool D) {
+        vy += GRAVITY;
+        h  += vy;
+        x  += f.vx;
+        if (!knockedDown) {                     // no air-steering while knocked down
+            if (U) z -= walkSpeedZ * 0.75f;
+            if (D) z += walkSpeedZ * 0.75f;
+        }
+        clampPos();
+        if (grounded()) {                       // landed this tick
+            h = 0.f; vy = 0.f; f.vx = 0.f;
+            f.setFrame(knockedDown ? fid::LYING : fid::STANDING);
+        } else if (!knockedDown) {
+            // Pick the airborne pose by vertical velocity. Walking the next-graph
+            // here would fall through to standing mid-air (the "jumps in a
+            // standing pose" bug). Dash (running-jump) has its own 213/214 frames.
+            if (f.state() == ST_DASH) {
+                int df = (vy < 0.f) ? fid::DASH : fid::DASH + 1;      // 213 rise / 214 fall
+                if (f.frameId != df) f.setFrame(df);
+            } else {
+                int jf = (vy < -1.f) ? fid::JUMP : (vy < 1.f) ? fid::JUMP + 1 : fid::JUMP + 2;
+                if (f.frameId != jf) f.setFrame(jf);
+            }
+        }
+    }
+
+    // ── Running ──────────────────────────────────────────────────────────────
+    void runTick(bool L, bool R, bool U, bool D, bool atk, bool jmp) {
+        if (atk) { f.setFrame(fid::RUN_ATTACK); return; }  // running attack, not stand punch
+        if (jmp) { startDash();                 return; }  // running jump = dash
+        bool keepDir = right ? (R && !L) : (L && !R);
+        if (!keepDir) { f.setFrame(fid::STANDING); return; }
+        x += right ? runSpeed : -runSpeed;
+        if (U) z -= runSpeedZ;
+        if (D) z += runSpeedZ;
+        clampPos();
+        cycleAnim(fid::RUNNING, fid::RUN_LAST, runRate);   // 9→11 loop
+    }
+
+    // Cycle a contiguous frame range [first,last] at `rate` ticks per frame.
+    void cycleAnim(int first, int last, int rate) {
+        if (f.frameId < first || f.frameId > last) { f.setFrame(first); animTimer = 0; return; }
+        if (++animTimer >= (rate > 0 ? rate : 1)) {
+            animTimer = 0;
+            int nx = f.frameId + 1;
+            if (nx > last) nx = first;
+            f.setFrame(nx);
+        }
+    }
+
+    void enterRun() { f.setFrame(fid::RUNNING); animTimer = 0; tapTimer = 0; }
 
     // ── Sub-behaviours ───────────────────────────────────────────────────────
     // Launch only: sets the arc; gravity is integrated by the airborne branch of
@@ -165,6 +239,14 @@ struct Player {
         h  = -0.1f;
         vy = jumpVy;
         f.vx = moving ? (right ? jumpDist : -jumpDist) : 0.f;
+    }
+
+    // Running jump: a low, fast forward leap (state 5, frames 213-214).
+    void startDash() {
+        f.setFrame(fid::DASH);                 // state 5
+        h  = -0.1f;
+        vy = dashVy;
+        f.vx = right ? dashDist : -dashDist;
     }
 
     // Raise a guard (state 7). The caller decides when to hold it up; hit()

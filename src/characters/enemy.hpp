@@ -110,7 +110,7 @@ struct Enemy {
             } else {
                 bool moving = false;
                 if (dx > 60.f) { x += right ? WALK_SPEED : -WALK_SPEED; moving = true; }
-                if (dz > 30.f) { z += (target.z > z) ? WALK_SPEEDZ : -WALK_SPEEDZ; moving = true; }
+                if (dz > 30.f) { z += (tz > z) ? WALK_SPEEDZ : -WALK_SPEEDZ; moving = true; }
                 x = clampF(x, 0.f, (float)(MAP_W - SW));
                 z = clampF(z, (float)Z_MIN, (float)Z_MAX);
 

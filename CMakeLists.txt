@@ -9,7 +9,10 @@ project(lf2-vita)
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "Little Fighter 2 Vita")
-set(VITA_TITLEID  "LF2V00001")
+# NOTE: bumped from LF2V00001 → LF2V00002 because the old TITLE_ID's install
+# slot on the target Vita got into a state scePromoterUtil refuses (install
+# fails at the promote step, no bubble). A fresh id installs into a clean slot.
+set(VITA_TITLEID  "LF2V00002")
 set(VITA_VERSION  "01.06")   # v0.6.0 — frame-driven player
 
 # All headers are include-only (no .cpp besides main).
@@ -32,19 +35,14 @@ vita_create_self(${PROJECT_NAME}.self ${PROJECT_NAME})
 vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   VERSION ${VITA_VERSION}
   NAME    ${VITA_APP_NAME}
-  # Icon + Live Area (these exist in sce_sys/ but were never packaged, so the
-  # app showed the default placeholder icon on the Vita's home screen)
-  FILE sce_sys/icon0.png                      sce_sys/icon0.png
-  FILE sce_sys/livearea/contents/bg.png       sce_sys/livearea/contents/bg.png
-  FILE sce_sys/livearea/contents/startup.png  sce_sys/livearea/contents/startup.png
-  FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
+  # Custom sce_sys (icon0 + LiveArea) is DISABLED: those files make
+  # scePromoterUtil reject the package (install fails, no bubble). Until we ship
+  # Vita-spec replacements, the VPK uses VitaSDK's default sce_sys, which installs
+  # fine. Game assets + character data below are packaged normally.
   FILE assets/dennis_0.png assets/dennis_0.png
   FILE assets/dennis_1.png assets/dennis_1.png
   FILE assets/dennis_2.png assets/dennis_2.png
   FILE assets/firen_0.png  assets/firen_0.png
-  # Character data read at runtime by dat::load("app0:/data/...").
-  # NOTE: these .dat are the original game's copyrighted assets (gitignored);
-  # they must be present locally for the build, and not redistributed.
   FILE data/dennis.dat     data/dennis.dat
   FILE assets/forests.png  assets/forests.png
   FILE assets/forestm1.png assets/forestm1.png

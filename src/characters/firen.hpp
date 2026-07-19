@@ -39,12 +39,16 @@ static const FrameData FIREN_ATTACK_SEQ[] = {
     {10,4,1}, {11,6,-1}
 };
 
-// Damage reactions — reuse same pic indices as Dennis for now
+// Damage reactions.
+// NOTE: Firen ships with only ONE sheet (firen_0.png = pics 0-69). Dennis's hit
+// pics (120-124) live in his 2nd/3rd sheet, which Firen doesn't have, so using
+// them drew an off-sheet (blank) cell — the enemy "vanished" when hit. These use
+// the in-range tumble pics (30-31) so the reaction is visible.
 static const FrameData FIREN_HIT_SEQ[] = {
-    {120,4,1}, {121,4,-1}
+    {30,4,1}, {31,4,-1}
 };
 static const FrameData FIREN_HIT_KD_SEQ[] = {
-    {123,3,1}, {124,3,-1}
+    {30,3,1}, {31,3,-1}
 };
 static const FrameData FIREN_FALL_SEQ[] = {
     {30,3,1}, {31,3,2}, {32,3,3}, {33,3,4}, {34,3,-1}
