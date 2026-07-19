@@ -1,7 +1,8 @@
 #pragma once
 #include "../engine/types.hpp"
 #include "firen.hpp"
-#include "char.hpp"   // forward reference for Char (target)
+// Target is passed as bare (x, z) so the enemy no longer depends on the player
+// type — it works whether the player is the old Char or the new lf2::Player.
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Enemy — Firen with simple pursuit AI
@@ -86,7 +87,7 @@ struct Enemy {
     }
 
     // ── Per-tick AI update ────────────────────────────────────────────────────
-    void tick(const Char& target) {
+    void tick(float tx, float tz) {
         if (state == St::DEAD) return;
 
         if (hitFlash > 0) hitFlash--;
@@ -96,10 +97,10 @@ struct Enemy {
         if (state == St::HIT || state == St::HIT_KD) { advanceAnim(); return; }
 
         // Always face the player
-        right = (target.x > x);
+        right = (tx > x);
 
-        float dx = fabsf(target.x - x);
-        float dz = fabsf(target.z - z);
+        float dx = fabsf(tx - x);
+        float dz = fabsf(tz - z);
 
         if (state == St::IDLE || state == St::WALK) {
             if (aiCooldown > 0) aiCooldown--;

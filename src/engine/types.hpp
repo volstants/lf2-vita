@@ -21,7 +21,9 @@ constexpr float WALK_SPEED  = 5.0f;
 constexpr float WALK_SPEEDZ = 2.5f;
 constexpr float GRAVITY     = 0.7f;
 constexpr float JUMP_VY     = -16.3f;   // from davis.js
-constexpr int   TICK_MS     = 17;
+constexpr int   TICK_MS     = 33;   // 30 Hz logic — LF2's native tick. The frame
+                                    // interpreter's wait/dv values assume it; at
+                                    // 60 Hz every animation runs double speed.
 
 // ── [VITA] PS Vita SDL2 button indices ────────────────────────────────────────
 constexpr int     BTN_UP     = 8;

@@ -10,7 +10,7 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "Little Fighter 2 Vita")
 set(VITA_TITLEID  "LF2V00001")
-set(VITA_VERSION  "01.05")   # v0.5.0
+set(VITA_VERSION  "01.06")   # v0.6.0 — frame-driven player
 
 # All headers are include-only (no .cpp besides main).
 # Add subdirectories so #include "engine/..." and "characters/..." resolve.
@@ -40,7 +40,12 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
   FILE assets/dennis_0.png assets/dennis_0.png
   FILE assets/dennis_1.png assets/dennis_1.png
+  FILE assets/dennis_2.png assets/dennis_2.png
   FILE assets/firen_0.png  assets/firen_0.png
+  # Character data read at runtime by dat::load("app0:/data/...").
+  # NOTE: these .dat are the original game's copyrighted assets (gitignored);
+  # they must be present locally for the build, and not redistributed.
+  FILE data/dennis.dat     data/dennis.dat
   FILE assets/forests.png  assets/forests.png
   FILE assets/forestm1.png assets/forestm1.png
   FILE assets/forestm2.png assets/forestm2.png
