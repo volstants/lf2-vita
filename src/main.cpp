@@ -7,52 +7,47 @@
 #include "engine/render.hpp"
 #include "engine/dat.hpp"
 #include "engine/fighter.hpp"
-#include "characters/player.hpp"   // lf2::Player — frame-driven, replaces Char
-#include "characters/enemy.hpp"
+#include "characters/player.hpp"   // lf2::Player — frame-driven actor (player)
+#include "characters/enemy.hpp"    // Enemy = lf2::Player + pursuit AI
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Character data (loaded once from the original .dat, bundled in the VPK).
-//  The player is now fully data-driven; enemies still use the hand-tuned Firen
-//  until they are migrated to lf2::Player too.
+//  Character data — loaded once from the original .dat, bundled in the VPK.
+//  Player and enemies are both data-driven now; add more characters by loading
+//  more .dat files here.
 // ─────────────────────────────────────────────────────────────────────────────
 static dat::File g_dennis;
+static dat::File g_firen;
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Collision helpers
+//  Collision helpers — work on any lf2::Player (player OR enemy actor)
 // ─────────────────────────────────────────────────────────────────────────────
-static inline bool isKnockdown(int dmg) { return dmg >= 25; }
-
 static inline Box toBox(const lf2::WBox& w) {
     return { (int)w.x, (int)w.y, (int)w.w, (int)w.h };
 }
 
-// The player's first attacking itr (kind 0) for this frame, in world space.
-static bool playerAttack(const lf2::Player& p, Box& out, int& injury) {
+// First attacking itr (kind 0) of the actor's current frame, in world space.
+// Only present during attack frames, so it doubles as "is this actor striking?".
+// Reports the itr's `injury` (damage) and `fall` (knockdown weight).
+static bool actorAttack(const lf2::Player& p, Box& out, int& injury, int& fall) {
     bool found = false;
     p.f.forEachItr([&](const lf2::WBox& wb, const dat::Itr& it) {
         if (it.kind == 0 && !found) {
             out    = toBox(wb);
-            injury = it.injury > 0 ? it.injury : 30;
+            injury = it.injury > 0 ? it.injury : 20;
+            fall   = it.fall;
             found  = true;
         }
     });
     return found;
 }
 
-// The player's first body box (kind 0) for this frame, in world space.
-static bool playerBody(const lf2::Player& p, Box& out) {
+// First body box of the actor's current frame, in world space.
+static bool actorBody(const lf2::Player& p, Box& out) {
     bool found = false;
     p.f.forEachBdy([&](const lf2::WBox& wb, const dat::Bdy&) {
         if (!found) { out = toBox(wb); found = true; }
     });
     return found;
-}
-
-static void applyHitToEnemy(Enemy& e, int dmg, float kbx) {
-    e.hitFlash = 15;
-    e.hp = clampI(e.hp - dmg, 0, e.maxHp);
-    if (e.state == St::FALL || e.state == St::DEAD) return;
-    e.enter(isKnockdown(dmg) ? St::HIT_KD : St::HIT, 0, kbx);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -95,16 +90,16 @@ struct Textures {
     SDL_Texture* land1    = nullptr;
     SDL_Texture* land2    = nullptr;
     SDL_Texture* land4    = nullptr;
-    // Player sheets, indexed by the .dat's declared file() order:
+    // Character sheets, indexed by the .dat's declared file() order:
     //   0 → pics 0-69, 1 → pics 70-139, 2 → pics 140-209
-    SDL_Texture* charSheet[3] = { nullptr, nullptr, nullptr };
-    SDL_Texture* enemyTex = nullptr;
+    SDL_Texture* dennis[3] = { nullptr, nullptr, nullptr };  // magenta key
+    SDL_Texture* firen[3]  = { nullptr, nullptr, nullptr };  // black key
     SDL_Texture* shadow   = nullptr;
 
     void load(SDL_Renderer* r) {
         forests  = loadTex(r, "app0:/assets/forests.png",  false);
-        // These forest layers ship with BLACK transparent backgrounds (not the
-        // magenta the character sheets use), so they need a black color key.
+        // Forest layers ship with BLACK transparent backgrounds (not the magenta
+        // the Dennis sheets use), so they need a black color key.
         forestm1 = loadTex(r, "app0:/assets/forestm1.png", true, 0, 0, 0);
         forestm2 = loadTex(r, "app0:/assets/forestm2.png", true, 0, 0, 0);
         forestm3 = loadTex(r, "app0:/assets/forestm3.png", true, 0, 0, 0);
@@ -113,13 +108,26 @@ struct Textures {
         land1    = loadTex(r, "app0:/assets/land1.png",    false);
         land2    = loadTex(r, "app0:/assets/land2.png",    false);
         land4    = loadTex(r, "app0:/assets/land4.png",    false);
-        charSheet[0] = loadTex(r, "app0:/assets/dennis_0.png");
-        charSheet[1] = loadTex(r, "app0:/assets/dennis_1.png");
-        charSheet[2] = loadTex(r, "app0:/assets/dennis_2.png");
-        enemyTex     = loadTex(r, "app0:/assets/firen_0.png", true, 0, 0, 0); // black key
-        shadow       = loadTex(r, "app0:/assets/s.png",    false);
+        dennis[0] = loadTex(r, "app0:/assets/dennis_0.png");            // magenta
+        dennis[1] = loadTex(r, "app0:/assets/dennis_1.png");
+        dennis[2] = loadTex(r, "app0:/assets/dennis_2.png");
+        firen[0]  = loadTex(r, "app0:/assets/firen_0.png", true, 0, 0, 0); // black
+        firen[1]  = loadTex(r, "app0:/assets/firen_1.png", true, 0, 0, 0);
+        firen[2]  = loadTex(r, "app0:/assets/firen_2.png", true, 0, 0, 0);
+        shadow    = loadTex(r, "app0:/assets/s.png",       false);
     }
 };
+
+// Draw one frame-driven actor from its own sheets, at its .dat sprite origin.
+static void drawActor(SDL_Renderer* r, const lf2::Player& a, SDL_Texture* const sheets[3],
+                      int camX, Uint8 cr = 255, Uint8 cg = 255, Uint8 cb = 255)
+{
+    int ord, loc;
+    if (!a.f.sheetLocal(ord, loc) || ord < 0 || ord >= 3 || !sheets[ord]) return;
+    float dx, dy;
+    a.f.drawOrigin(dx, dy);
+    drawSprite(r, sheets[ord], loc, (int)dx - camX, (int)dy, !a.right, cr, cg, cb);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Render: background layers
@@ -142,7 +150,7 @@ static void renderBackground(SDL_Renderer* r, const Textures& tx, int camX) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Render: characters sorted by Z (painter's algorithm)
+//  Render: actors sorted by Z (painter's algorithm)
 // ─────────────────────────────────────────────────────────────────────────────
 static void renderCharacters(SDL_Renderer* r, const Textures& tx,
                              const lf2::Player& player, Enemy enemies[], int camX)
@@ -151,7 +159,7 @@ static void renderCharacters(SDL_Renderer* r, const Textures& tx,
         SDL_Rect ps = { (int)player.x - camX + 12, (int)player.z - 6, 56, 12 };
         SDL_RenderCopy(r, tx.shadow, nullptr, &ps);
         for (int i = 0; i < NUM_ENEMIES; i++) {
-            SDL_Rect es = { (int)enemies[i].x - camX + 12, (int)enemies[i].z - 6, 56, 12 };
+            SDL_Rect es = { (int)enemies[i].a.x - camX + 12, (int)enemies[i].a.z - 6, 56, 12 };
             SDL_RenderCopy(r, tx.shadow, nullptr, &es);
         }
     }
@@ -159,7 +167,7 @@ static void renderCharacters(SDL_Renderer* r, const Textures& tx,
     struct Drawable { float z; int type; int idx; };
     Drawable dlist[NUM_ENEMIES + 1];
     dlist[0] = { player.z, 0, 0 };
-    for (int i = 0; i < NUM_ENEMIES; i++) dlist[i + 1] = { enemies[i].z, 1, i };
+    for (int i = 0; i < NUM_ENEMIES; i++) dlist[i + 1] = { enemies[i].a.z, 1, i };
 
     for (int i = 1; i < NUM_ENEMIES + 1; i++) {
         Drawable key = dlist[i]; int j = i - 1;
@@ -169,25 +177,12 @@ static void renderCharacters(SDL_Renderer* r, const Textures& tx,
 
     for (int i = 0; i < NUM_ENEMIES + 1; i++) {
         if (dlist[i].type == 0) {
-            // Player: map the current pic to its real sheet + local cell, then
-            // blit from the .dat-declared sprite origin (fixes the old pic>=100
-            // split and the missing dennis_2 sheet).
-            int ord, loc;
-            if (player.f.sheetLocal(ord, loc) && ord >= 0 && ord < 3 &&
-                tx.charSheet[ord])
-            {
-                float dx, dy;
-                player.f.drawOrigin(dx, dy);
-                drawSprite(r, tx.charSheet[ord], loc,
-                           (int)dx - camX, (int)dy, !player.right);
-            }
+            drawActor(r, player, tx.dennis, camX);
         } else {
             int k = dlist[i].idx;
             bool flash = enemies[k].hitFlash > 0;
-            drawSprite(r, tx.enemyTex, enemies[k].pic(),
-                       (int)enemies[k].x - camX, enemies[k].spriteY(),
-                       !enemies[k].right,
-                       255, flash ? 80 : 255, flash ? 80 : 255);
+            drawActor(r, enemies[k].a, tx.firen, camX,
+                      255, flash ? 80 : 255, flash ? 80 : 255);
         }
     }
 }
@@ -210,16 +205,16 @@ static void renderHUD(SDL_Renderer* r, const Textures& tx,
         fillRect(r, i * SW_SLOT - 1, 2, 2, HUD_H - 4, 10, 20, 80);
 
     fillRect(r, 2, 2, PORT_W, PORT_H, 18, 36, 90);
-    drawSpriteAt(r, tx.charSheet[0], 0, 2, 2, PORT_W, PORT_H, false);
+    drawSpriteAt(r, tx.dennis[0], 0, 2, 2, PORT_W, PORT_H, false);
     drawHpBar(r, BAR_X, 10, player.hp(), player.maxHp(), 210, 40,  40);
     drawHpBar(r, BAR_X, 28,           0, player.maxHp(),  40, 110, 210);
 
     for (int i = 0; i < NUM_ENEMIES; i++) {
         int sx = (i + 1) * SW_SLOT;
         fillRect(r, sx + 2, 2, PORT_W, PORT_H, 18, 36, 90);
-        drawSpriteAt(r, tx.enemyTex, 0, sx + 2, 2, PORT_W, PORT_H, true);
-        drawHpBar(r, sx + BAR_X, 10, enemies[i].hp, enemies[i].maxHp, 210, 40,  40);
-        drawHpBar(r, sx + BAR_X, 28,             0, enemies[i].maxHp,  40, 110, 210);
+        drawSpriteAt(r, tx.firen[0], 0, sx + 2, 2, PORT_W, PORT_H, true);
+        drawHpBar(r, sx + BAR_X, 10, enemies[i].a.hp(), enemies[i].a.maxHp(), 210, 40,  40);
+        drawHpBar(r, sx + BAR_X, 28,                 0, enemies[i].a.maxHp(),  40, 110, 210);
     }
 }
 
@@ -254,12 +249,17 @@ static void resetGame(lf2::Player& player, Enemy enemies[], GameSt& gameSt) {
     player.z = (float)Z_MIN;
     player.right = true;
 
-    const float ex[] = { 1600.f, 2200.f, 2800.f };
-    const float ez[] = { (float)Z_MIN, (float)(Z_MIN + Z_MAX) / 2, (float)Z_MAX };
+    const float ex[]  = { 1600.f, 2200.f, 2800.f };
+    const float ez[]  = { (float)Z_MIN, (float)(Z_MIN + Z_MAX) / 2, (float)Z_MAX };
+    // Striking standoff beside the player (within reach): flank left / right /
+    // left so the trio spreads but every enemy still closes in and connects.
+    const float off[] = { -50.f, 50.f, -50.f };
     for (int i = 0; i < NUM_ENEMIES; i++) {
-        enemies[i]   = Enemy();
-        enemies[i].x = ex[i];
-        enemies[i].z = ez[i];
+        enemies[i] = Enemy();
+        enemies[i].load(&g_firen);
+        enemies[i].a.x     = ex[i];
+        enemies[i].a.z     = ez[i];
+        enemies[i].aimOffset = off[i];
     }
     gameSt = GameSt::PLAYING;
 }
@@ -273,12 +273,13 @@ int main(int, char*[]) {
 
     // Character data — must be bundled in the VPK (see CMakeLists.txt).
     g_dennis = dat::load("app0:/data/dennis.dat");
+    g_firen  = dat::load("app0:/data/firen.dat");
 
     SDL_Joystick* joy = nullptr;
     if (SDL_NumJoysticks() > 0) joy = SDL_JoystickOpen(0);
 
     SDL_Window*   win = SDL_CreateWindow(
-        "LF2 Vita v0.6.0",
+        "LF2 Vita v0.7.0",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         SCREEN_W, SCREEN_H, SDL_WINDOW_SHOWN);
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
@@ -295,7 +296,7 @@ int main(int, char*[]) {
     bool   playerWon     = false;
 
     bool prevAtk = false, prevJmp = false, prevAny = false;
-    bool prevPlayerAttacking = false;   // rising edge = new attack swing
+    bool prevPlayerAttacking = false;   // rising edge = new player swing
 
     Uint32 nextTick = SDL_GetTicks();
     bool   running  = true;
@@ -322,55 +323,49 @@ int main(int, char*[]) {
                 for (int i = 0; i < NUM_ENEMIES; i++)
                     enemies[i].tick(player.x, player.z);
 
-                // New attack swing → let each enemy be hit once by it.
+                // New player swing → each enemy is vulnerable to it once.
                 bool attacking = (player.state() == lf2::ST_ATTACK);
                 if (attacking && !prevPlayerAttacking)
                     for (int i = 0; i < NUM_ENEMIES; i++) enemies[i].hitByPlayer = false;
                 prevPlayerAttacking = attacking;
 
                 // ── Player attack → enemy body ────────────────────────────────
-                Box atkBox; int atkInjury = 0;
-                if (playerAttack(player, atkBox, atkInjury)) {
+                Box atkBox; int atkInjury = 0, atkFall = -1;
+                if (actorAttack(player, atkBox, atkInjury, atkFall)) {
                     for (int i = 0; i < NUM_ENEMIES; i++) {
+                        Box ebody;
                         if (!enemies[i].hitByPlayer && enemies[i].alive() &&
-                            fabsf(player.z - enemies[i].z) <= 12.f &&
-                            boxOverlap(atkBox, enemies[i].bdy()))
+                            fabsf(player.z - enemies[i].a.z) <= 12.f &&
+                            actorBody(enemies[i].a, ebody) &&
+                            boxOverlap(atkBox, ebody))
                         {
                             enemies[i].hitByPlayer = true;
+                            enemies[i].hitFlash    = 15;
                             float kbx = player.right ? 30.f : -30.f;
-                            applyHitToEnemy(enemies[i], atkInjury, kbx);
+                            enemies[i].a.hit(atkInjury, kbx, atkFall);
                         }
                     }
                 }
 
-                // ── Enemy attack → player body ────────────────────────────────
-                Box pBody; bool haveBody = playerBody(player, pBody);
-                if (haveBody && player.alive()) {
+                // ── Enemy attacks → player body ───────────────────────────────
+                Box pBody;
+                if (player.alive() && actorBody(player, pBody)) {
                     for (int i = 0; i < NUM_ENEMIES; i++) {
-                        if (!enemies[i].atkHit &&
-                            fabsf(player.z - enemies[i].z) <= 12.f &&
-                            boxOverlap(enemies[i].itr(), pBody))
+                        Box eatk; int einj = 0, efall = -1;
+                        if (!enemies[i].hasHitPlayer && enemies[i].alive() &&
+                            fabsf(player.z - enemies[i].a.z) <= 12.f &&
+                            actorAttack(enemies[i].a, eatk, einj, efall) &&
+                            boxOverlap(eatk, pBody))
                         {
-                            enemies[i].atkHit = true;
-                            float kbx = enemies[i].right ? 30.f : -30.f;
-                            player.hit(FIREN_INJURY, kbx, isKnockdown(FIREN_INJURY));
+                            enemies[i].hasHitPlayer = true;
+                            float kbx = enemies[i].a.right ? 30.f : -30.f;
+                            player.hit(einj, kbx, efall);
                         }
                     }
                 }
 
-                // ── Body separation ───────────────────────────────────────────
-                // LF2 characters do NOT block each other's movement — you walk,
-                // run and jump straight through, just like the original and F.LF.
-                // So the player is never pushed by enemies. Enemies still nudge
-                // apart from EACH OTHER so the trio doesn't collapse into one
-                // sprite while chasing.
-                auto enemySeparable = [](St s) { return s != St::DEAD && s != St::FALL; };
-                for (int i = 0; i < NUM_ENEMIES; i++)
-                for (int j = i + 1; j < NUM_ENEMIES; j++) {
-                    if (enemySeparable(enemies[i].state) && enemySeparable(enemies[j].state))
-                        separateX(enemies[i].x, enemies[i].z, FIREN_BDY,
-                                  enemies[j].x, enemies[j].z, FIREN_BDY);
-                }
+                // Bodies never block movement (LF2 lets you pass through); the
+                // per-enemy aim offset keeps the trio from stacking.
 
                 bool allDead = true;
                 for (int i = 0; i < NUM_ENEMIES; i++)

@@ -102,23 +102,31 @@ int main() {
     // ── Combat reactions ─────────────────────────────────────────────────────
     auto reset = [&]() {
         p.f.hp = p.f.maxHp; p.h = 0.f; p.vy = 0.f; p.knockedDown = false;
+        p.fallValue = lf2::Player::FALL_MAX;
         p.right = true; p.f.setFrame(lf2::fid::STANDING, false);
     };
 
-    // Light hit → injured stagger, HP drops, recovers to standing.
+    // Single weak hit (fall 25) → stagger in place, NOT a knockdown.
     reset();
-    int lost = p.hit(20, -10.f, /*heavy=*/false);
-    CHECK(lost == 20,                     "light hit removes 20 HP");
-    CHECK(p.state() == lf2::ST_INJURED,   "light hit → injured (state 11)");
+    int lost = p.hit(20, -10.f, /*fall=*/25);
+    CHECK(lost == 20,                     "weak hit removes 20 HP");
+    CHECK(p.state() == lf2::ST_INJURED,   "weak hit → stagger (state 11), no knockdown");
+    CHECK(!p.knockedDown,                 "weak hit does not knock down");
     guard = 0;
     while (p.state() == lf2::ST_INJURED && guard++ < 100)
         p.tick(false,false,false,false,false,false);
-    CHECK(p.state() == lf2::ST_STANDING,  "injured recovers to standing");
+    CHECK(p.state() == lf2::ST_STANDING,  "stagger recovers to standing");
 
-    // Heavy hit (survivable) → knockdown → lying → gets back up.
+    // A rapid sequence of weak hits accumulates into a knockdown.
     reset();
-    p.hit(40, -10.f, /*heavy=*/true);
-    CHECK(p.knockedDown,                  "heavy hit sets knockdown");
+    p.hit(20, -10.f, 25); CHECK(!p.knockedDown, "combo hit 1: still standing");
+    p.hit(20, -10.f, 25); CHECK(!p.knockedDown, "combo hit 2: still standing");
+    p.hit(20, -10.f, 25); CHECK(p.knockedDown,  "combo hit 3: fall budget spent → knockdown");
+
+    // Single heavy blow (fall >= 60) knocks down immediately.
+    reset();
+    p.hit(40, -10.f, /*fall=*/60);
+    CHECK(p.knockedDown,                  "heavy blow (fall>=60) knocks down at once");
     CHECK(p.state() == lf2::ST_FALLING,   "heavy hit → falling (state 12)");
     guard = 0;
     while (p.state() != lf2::ST_LYING && guard++ < 300)
@@ -135,13 +143,13 @@ int main() {
     p.defend();
     CHECK(p.isDefending(),                "defend enters guard (state 7)");
     int hpBefore = p.hp();
-    int blocked = p.hit(20, -30.f, /*heavy=*/false);   // struck from the front
+    int blocked = p.hit(20, -30.f, /*fall=*/25);       // struck from the front
     CHECK(blocked == 0 && p.hp() == hpBefore, "front defend fully blocks a light hit");
 
     // Fatal knockdown → dead, pinned lying.
     reset();
     p.f.hp = 10;
-    p.hit(999, -10.f, /*heavy=*/true);
+    p.hit(999, -10.f, /*fall=*/60);
     guard = 0;
     while (p.state() != lf2::ST_LYING && guard++ < 300)
         p.tick(false,false,false,false,false,false);

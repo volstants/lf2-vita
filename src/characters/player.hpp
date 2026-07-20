@@ -48,6 +48,13 @@ struct Player {
     bool  right = true;
     bool  knockedDown = false; // in a heavy-hit fall→lie sequence
 
+    // LF2 fall counter: a knockdown "budget" that each hit spends (by the itr's
+    // `fall`) and that regenerates over time. Weak hits stagger in place; only
+    // when the budget runs out does the actor get knocked down — so a rapid
+    // combo floors you but spaced single hits don't.
+    static constexpr int FALL_MAX = 60;
+    int   fallValue = FALL_MAX;
+
     // Input edge / double-tap-to-run tracking.
     bool  prevL = false, prevR = false;
     int   tapDir = 0, tapTimer = 0;
@@ -120,6 +127,7 @@ struct Player {
         bool newL = L && !prevL, newR = R && !prevR;
         prevL = L; prevR = R;
         if (tapTimer > 0) --tapTimer;
+        if (fallValue < FALL_MAX) ++fallValue;   // knockdown budget regenerates
 
         if (!grounded()) { airborneTick(U, D); syncAnchor(); return; }
 
@@ -264,26 +272,32 @@ struct Player {
     //  • Light hit  → injured stagger (220 → 221 → standing).
     //  • Heavy/fatal → knockdown: launch into falling (180), land into lying;
     //    if HP hit 0 the actor stays down (dead), otherwise it gets back up.
-    int hit(int dmg, float kbx, bool heavy) {
+    int hit(int dmg, float kbx, int itrFall) {
+        if (itrFall < 0) itrFall = 20;                // default fall for unset itr
+        bool heavyBlow    = itrFall >= 60;            // guard-breaking / instant fall
         bool blockedFront = isDefending() &&
                             ((kbx < 0.f) == right);   // struck from the facing side
-        if (blockedFront && !heavy) return 0;         // fully guarded
+        if (blockedFront && !heavyBlow) return 0;     // fully guarded
 
         int before = f.hp;
         int taken  = blockedFront ? dmg / 2 : dmg;    // chip through a broken guard
         f.hp = clampI(f.hp - taken, 0, f.maxHp);
         int lost = before - f.hp;
 
-        if (blockedFront && heavy) { f.setFrame(fid::BROKEN_DEF); return lost; }
+        if (blockedFront && heavyBlow) { f.setFrame(fid::BROKEN_DEF); return lost; }
 
-        if (heavy || f.hp <= 0) {                     // knockdown
+        // Spend the fall budget. Knockdown only once it runs out (or on death);
+        // otherwise stagger in place and keep taking hits.
+        fallValue -= itrFall;
+        if (fallValue <= 0 || f.hp <= 0) {            // knockdown
+            fallValue   = FALL_MAX;
             knockedDown = true;
             f.setFrame(fid::FALLING);
             h = -0.1f; vy = -8.f;
             f.vx = (kbx < 0.f ? -6.f : 6.f);
-        } else {                                      // light stagger
+        } else {                                      // stagger in place
             f.setFrame(fid::INJURED);
-            x = clampF(x + kbx, 0.f, (float)(MAP_W - SW));
+            x = clampF(x + kbx * 0.25f, 0.f, (float)(MAP_W - SW));   // small nudge only
         }
         return lost;
     }

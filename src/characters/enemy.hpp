@@ -1,124 +1,73 @@
 #pragma once
-#include "../engine/types.hpp"
-#include "firen.hpp"
-// Target is passed as bare (x, z) so the enemy no longer depends on the player
-// type — it works whether the player is the old Char or the new lf2::Player.
+#include <cmath>
+#include "player.hpp"   // lf2::Player — the enemy IS a frame-driven actor
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Enemy — Firen with simple pursuit AI
+//  Enemy — AI-driven actor.
 //
-//  AI behaviour:
-//   1. Face the player every tick.
-//   2. If within attack range AND cooldown expired → enter ATTACK.
-//   3. Otherwise walk toward player (X and Z).
-//   4. After finishing an attack the cooldown resets so the enemy pauses
-//      briefly before swinging again (prevents infinite stunlock).
+//  Instead of a hand-written state machine, an enemy is a lf2::Player whose
+//  inputs come from a simple pursuit AI rather than the joystick. It reads its
+//  own .dat (firen.dat today, any character tomorrow), so animation, physics,
+//  hitboxes and damage reactions are all data-driven and identical to the
+//  player's. main.cpp renders it from its own sheets and runs the same
+//  frame-box collision against it.
 // ─────────────────────────────────────────────────────────────────────────────
 struct Enemy {
-    float x    = 1800.f;
-    float z    = Z_MIN;
-    float h    = 0.f;
-    float vy   = 0.f;
+    lf2::Player a;               // the actor (position, fighter, combat)
 
-    bool right       = false;
-    bool atkHit      = false;
-    bool hitByPlayer = false;
+    int  hitFlash    = 0;        // red-tint ticks after taking damage
+    int  aiCooldown  = 60;       // ticks before it may attack again
+    float aimOffset  = 0.f;      // horizontal standoff so the trio doesn't stack
 
-    int  hp    = FIREN_HP;
-    int  maxHp = FIREN_HP;
+    // Per-swing hit gates (mirror the player's newAttack/hitByPlayer handling).
+    bool hitByPlayer = false;    // already hit by the player's current swing?
+    bool hasHitPlayer = false;   // already landed on the player this swing?
+    bool wasAttacking = false;
+    bool newSwing     = false;   // true only on the tick an attack starts
 
-    int  hitFlash   = 0;    // ticks of red tint remaining after taking damage
-    int  aiCooldown = 60;   // ticks before AI can attack again
+    void load(const dat::File* d) { a.load(d); a.right = false; }
 
-    St  state = St::IDLE;
-    int si    = 0;
-    int wt    = 5;
+    // Bridges for main.cpp.
+    float x() const { return a.x; }
+    float z() const { return a.z; }
+    bool  alive() const { return a.alive(); }
 
-    // ── Accessors ─────────────────────────────────────────────────────────────
-    const FrameData* seq()  const { return FIREN_SEQS[(int)state]; }
-    int  pic()              const { return seq()[si].pic; }
-    int  spriteY()          const { return (int)(z + h) - SH; }
-    bool alive()            const { return state != St::DEAD; }
-
-    Box bdy() const {
-        return { (int)x + FIREN_BDY.x,
-                 spriteY() + FIREN_BDY.y,
-                 FIREN_BDY.w, FIREN_BDY.h };
-    }
-
-    Box itr() const {
-        if (state != St::ATTACK || si != FIREN_ITR_SI) return { 0, 0, 0, 0 };
-        const Box& r = right ? FIREN_ITR_R : FIREN_ITR_L;
-        return { (int)x + r.x, spriteY() + r.y, r.w, r.h };
-    }
-
-    // ── State transitions ─────────────────────────────────────────────────────
-    void enter(St s, int i = 0, float kbx = 0.f) {
-        St prev = state;
-        state = s; si = i; wt = seq()[i].wait;
-
-        if (s == St::ATTACK) { atkHit = false; }
-        if (s == St::HIT || s == St::HIT_KD) {
-            x = clampF(x + kbx, 0.f, (float)(MAP_W - SW));
-        }
-        // FIX: reset cooldown only when returning to IDLE after an attack,
-        //      not every time IDLE is entered (prevents instant re-attack).
-        if (s == St::IDLE && prev == St::ATTACK) {
-            aiCooldown = 90;
-        }
-    }
-
-    // ── Animation advance ─────────────────────────────────────────────────────
-    void advanceAnim() {
-        if (--wt > 0) return;
-
-        int nx = seq()[si].next;
-        if (nx >= 0) {
-            si = nx;
-            wt = seq()[si].wait;
-            return;
-        }
-        // Sequence ended
-        switch (state) {
-            case St::HIT_KD: enter(St::FALL);  break;
-            case St::FALL:   enter(St::DEAD);  break;
-            default:         enter(St::IDLE);  break;
-        }
-    }
-
-    // ── Per-tick AI update ────────────────────────────────────────────────────
+    // ── Per-tick AI ───────────────────────────────────────────────────────────
     void tick(float tx, float tz) {
-        if (state == St::DEAD) return;
+        if (hitFlash   > 0) hitFlash--;
+        if (aiCooldown > 0) aiCooldown--;
 
-        if (hitFlash > 0) hitFlash--;
+        int s = a.state();
+        bool reacting = !a.alive() ||
+                        s == lf2::ST_INJURED || s == lf2::ST_FALLING ||
+                        s == lf2::ST_LYING;
 
-        if (hp <= 0 && state != St::FALL) { enter(St::FALL); return; }
-        if (state == St::FALL)  { advanceAnim(); return; }
-        if (state == St::HIT || state == St::HIT_KD) { advanceAnim(); return; }
+        // Actual striking reach (punch itr ≈ 55 px; z hit tolerance ≈ 12 px,
+        // matching main.cpp's collision). Attacking outside this just whiffs.
+        constexpr float REACH_X = 55.f, REACH_Z = 12.f;
 
-        // Always face the player
-        right = (tx > x);
+        bool L=false, R=false, U=false, D=false, atk=false;
+        if (!reacting && s != lf2::ST_ATTACK) {
+            a.right = (tx > a.x);                  // always face the player
+            float dxP = std::fabs(tx - a.x);       // distance to the PLAYER (for striking)
+            float dz  = std::fabs(tz - a.z);
 
-        float dx = fabsf(tx - x);
-        float dz = fabsf(tz - z);
-
-        if (state == St::IDLE || state == St::WALK) {
-            if (aiCooldown > 0) aiCooldown--;
-
-            if (dx < 150.f && dz < 60.f && aiCooldown <= 0) {
-                enter(St::ATTACK);
+            if (dxP <= REACH_X && dz <= REACH_Z && aiCooldown <= 0) {
+                atk = true; aiCooldown = 60;       // genuinely in range → strike
             } else {
-                bool moving = false;
-                if (dx > 60.f) { x += right ? WALK_SPEED : -WALK_SPEED; moving = true; }
-                if (dz > 30.f) { z += (tz > z) ? WALK_SPEEDZ : -WALK_SPEEDZ; moving = true; }
-                x = clampF(x, 0.f, (float)(MAP_W - SW));
-                z = clampF(z, (float)Z_MIN, (float)Z_MAX);
-
-                St want = moving ? St::WALK : St::IDLE;
-                if (state != want) enter(want);
+                // Close the distance: line up on the player's z-row, then walk to
+                // a striking standoff beside them (aimOffset spreads the trio, but
+                // stays within reach so everyone actually pursues and connects).
+                float target = tx + aimOffset;
+                if (dz > 10.f)                       { if (tz > a.z)     D = true; else U = true; }
+                if (std::fabs(target - a.x) > 8.f)   { if (target > a.x) R = true; else L = true; }
             }
         }
+        a.tick(L, R, U, D, atk, false);
 
-        advanceAnim();
+        bool atkNow = (a.state() == lf2::ST_ATTACK);
+        newSwing    = atkNow && !wasAttacking;
+        wasAttacking = atkNow;
+        if (newSwing) hasHitPlayer = false;
     }
 };

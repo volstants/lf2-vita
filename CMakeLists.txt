@@ -13,7 +13,7 @@ set(VITA_APP_NAME "Little Fighter 2 Vita")
 # slot on the target Vita got into a state scePromoterUtil refuses (install
 # fails at the promote step, no bubble). A fresh id installs into a clean slot.
 set(VITA_TITLEID  "LF2V00002")
-set(VITA_VERSION  "01.06")   # v0.6.0 — frame-driven player
+set(VITA_VERSION  "01.07")   # v0.7.0 — inimigos data-driven (Fighter + IA)
 
 # All headers are include-only (no .cpp besides main).
 # Add subdirectories so #include "engine/..." and "characters/..." resolve.
@@ -50,7 +50,10 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   FILE assets/dennis_1.png assets/dennis_1.png
   FILE assets/dennis_2.png assets/dennis_2.png
   FILE assets/firen_0.png  assets/firen_0.png
+  FILE assets/firen_1.png  assets/firen_1.png
+  FILE assets/firen_2.png  assets/firen_2.png
   FILE data/dennis.dat     data/dennis.dat
+  FILE data/firen.dat      data/firen.dat
   FILE assets/forests.png  assets/forests.png
   FILE assets/forestm1.png assets/forestm1.png
   FILE assets/forestm2.png assets/forestm2.png

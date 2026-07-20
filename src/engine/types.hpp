@@ -32,6 +32,7 @@ constexpr int     BTN_LEFT   = 7;
 constexpr int     BTN_RIGHT  = 9;
 constexpr int     BTN_ATTACK = 2;
 constexpr int     BTN_JUMP   = 1;
+constexpr int     BTN_DEFEND = 0;   // 3rd face button — adjust index on device if needed
 constexpr int     DEADZONE   = 8000;   // compared against SDL_JoystickGetAxis (Sint16)
 
 // ── Hit detection ─────────────────────────────────────────────────────────────
