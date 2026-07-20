@@ -53,7 +53,7 @@ static bool actorBody(const lf2::Player& p, Box& out) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  Input helpers (PS Vita joystick → bool directions / buttons)
 // ─────────────────────────────────────────────────────────────────────────────
-struct InputState { bool L, R, U, D, atk, jmp, any; };
+struct InputState { bool L, R, U, D, atk, jmp, def, any; };
 
 static InputState readInput(SDL_Joystick* joy) {
     InputState in{};
@@ -73,7 +73,8 @@ static InputState readInput(SDL_Joystick* joy) {
 
     in.atk = SDL_JoystickGetButton(joy, BTN_ATTACK);
     in.jmp = SDL_JoystickGetButton(joy, BTN_JUMP);
-    in.any = in.atk || in.jmp || in.L || in.R || in.U || in.D;
+    in.def = SDL_JoystickGetButton(joy, BTN_DEFEND);
+    in.any = in.atk || in.jmp || in.def || in.L || in.R || in.U || in.D;
     return in;
 }
 
@@ -319,7 +320,7 @@ int main(int, char*[]) {
                 if (anyPress) resetGame(player, enemies, gameSt);
             }
             else if (gameSt == GameSt::PLAYING) {
-                player.tick(raw.L, raw.R, raw.U, raw.D, atk, jmp);
+                player.tick(raw.L, raw.R, raw.U, raw.D, atk, jmp, raw.def);
                 for (int i = 0; i < NUM_ENEMIES; i++)
                     enemies[i].tick(player.x, player.z);
 

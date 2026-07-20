@@ -99,6 +99,20 @@ int main() {
     CHECK(p.state() == lf2::ST_DASH,     "running jump enters dash (state 5)");
     CHECK(!p.grounded() && p.f.vx > p.jumpDist, "dash leaps faster forward than a jump");
 
+    // Defend: holding the guard button raises the shield; releasing drops it.
+    p.f.setFrame(lf2::fid::STANDING, false); p.h = 0.f; p.vy = 0.f;
+    p.tick(false,false,false,false, false,false, true);   // hold defend
+    CHECK(p.state() == lf2::ST_DEFEND,   "holding defend raises guard (state 7)");
+    p.tick(false,false,false,false, false,false, false);  // release
+    CHECK(p.state() == lf2::ST_STANDING, "releasing defend returns to standing");
+
+    // Jump attack: pressing attack in the air enters the jump-attack frames.
+    p.f.setFrame(lf2::fid::STANDING, false); p.h = 0.f; p.vy = 0.f;
+    p.tick(false,false,false,false, false, true);         // jump
+    CHECK(!p.grounded(),                 "jump left the ground");
+    p.tick(false,false,false,false, true, false);         // attack airborne
+    CHECK(p.f.frameId == lf2::fid::JUMP_ATTACK, "air attack enters jump_attack (frame 80)");
+
     // ── Combat reactions ─────────────────────────────────────────────────────
     auto reset = [&]() {
         p.f.hp = p.f.maxHp; p.h = 0.f; p.vy = 0.f; p.knockedDown = false;
@@ -145,6 +159,7 @@ int main() {
     int hpBefore = p.hp();
     int blocked = p.hit(20, -30.f, /*fall=*/25);       // struck from the front
     CHECK(blocked == 0 && p.hp() == hpBefore, "front defend fully blocks a light hit");
+    CHECK(p.f.frameId == lf2::fid::DEFEND + 1, "blocking shows the guard-recoil frame (111)");
 
     // Fatal knockdown → dead, pinned lying.
     reset();

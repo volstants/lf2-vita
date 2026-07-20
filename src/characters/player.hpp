@@ -26,8 +26,10 @@ namespace fid {
     constexpr int WALK_LAST = 8;
     constexpr int RUNNING   = 9;   // 9-11
     constexpr int RUN_LAST  = 11;
-    constexpr int PUNCH      = 60; // basic attack
-    constexpr int RUN_ATTACK = 85; // running attack
+    constexpr int PUNCH       = 60; // basic attack
+    constexpr int JUMP_ATTACK = 80; // 80-82 (state 3)
+    constexpr int RUN_ATTACK  = 85; // running attack
+    constexpr int DASH_ATTACK = 90; // 90-92 (state 15)
     constexpr int JUMP     = 210;  // 210-212
     constexpr int DASH     = 213;  // 213-217
     constexpr int DEFEND   = 110;  // 110-111
@@ -122,14 +124,14 @@ struct Player {
     }
 
     // ── Per-tick update (run at 30 Hz) ───────────────────────────────────────
-    void tick(bool L, bool R, bool U, bool D, bool atk, bool jmp) {
+    void tick(bool L, bool R, bool U, bool D, bool atk, bool jmp, bool def = false) {
         // Input edge + double-tap bookkeeping (every tick).
         bool newL = L && !prevL, newR = R && !prevR;
         prevL = L; prevR = R;
         if (tapTimer > 0) --tapTimer;
         if (fallValue < FALL_MAX) ++fallValue;   // knockdown budget regenerates
 
-        if (!grounded()) { airborneTick(U, D); syncAnchor(); return; }
+        if (!grounded()) { airborneTick(U, D, atk); syncAnchor(); return; }
 
         int s = f.state();
 
@@ -140,11 +142,21 @@ struct Player {
             return;
         }
 
+        // Guarding: hold the idle guard (110) while held; if a blocked hit bumped
+        // us to the block-recoil (111), let it animate back to 110.
+        if (s == ST_DEFEND) {
+            if      (!def)                     f.setFrame(fid::STANDING); // dropped guard
+            else if (f.frameId != fid::DEFEND) f.advance();              // recoil 111 → 110
+            syncAnchor();
+            return;
+        }
+
         // Running has its own control + animation cycle.
         if (s == ST_RUNNING) { runTick(L, R, U, D, atk, jmp); syncAnchor(); return; }
 
         if (s == ST_STANDING || s == ST_WALKING) {
-            if (atk)      { f.setFrame(fid::PUNCH); }
+            if (def)      { f.setFrame(fid::DEFEND); }   // raise guard (blocks move/atk)
+            else if (atk) { f.setFrame(fid::PUNCH); }
             else if (jmp) { startJump(L || R); }
             else {
                 if (L) right = false;
@@ -187,7 +199,7 @@ struct Player {
     // Physics take over whenever off the ground, INDEPENDENT of the animation
     // state — jump frames can cycle to standing (next:999) mid-arc, so grounding
     // is decided by h, not by the frame's state, or the actor freezes floating.
-    void airborneTick(bool U, bool D) {
+    void airborneTick(bool U, bool D, bool atk) {
         vy += GRAVITY;
         h  += vy;
         x  += f.vx;
@@ -199,17 +211,28 @@ struct Player {
         if (grounded()) {                       // landed this tick
             h = 0.f; vy = 0.f; f.vx = 0.f;
             f.setFrame(knockedDown ? fid::LYING : fid::STANDING);
-        } else if (!knockedDown) {
-            // Pick the airborne pose by vertical velocity. Walking the next-graph
-            // here would fall through to standing mid-air (the "jumps in a
-            // standing pose" bug). Dash (running-jump) has its own 213/214 frames.
-            if (f.state() == ST_DASH) {
-                int df = (vy < 0.f) ? fid::DASH : fid::DASH + 1;      // 213 rise / 214 fall
-                if (f.frameId != df) f.setFrame(df);
-            } else {
-                int jf = (vy < -1.f) ? fid::JUMP : (vy < 1.f) ? fid::JUMP + 1 : fid::JUMP + 2;
-                if (f.frameId != jf) f.setFrame(jf);
-            }
+            return;
+        }
+        if (knockedDown) return;                // a knockdown holds its falling frame
+
+        int s = f.state();
+        // Already mid air-attack (jump_attack = state 3, dash_attack = state 15):
+        // let its frames play out.
+        if (s == ST_ATTACK || s == ST_SPECIAL) { f.advance(); return; }
+        // Attack pressed in the air → jump attack, or dash attack from a dash.
+        if (atk) {
+            f.setFrame(s == ST_DASH ? fid::DASH_ATTACK : fid::JUMP_ATTACK);
+            return;
+        }
+        // Otherwise pick the airborne pose by vertical velocity. Walking the
+        // next-graph here would fall through to standing mid-air (the "jumps in a
+        // standing pose" bug). Dash has its own 213/214 frames.
+        if (s == ST_DASH) {
+            int df = (vy < 0.f) ? fid::DASH : fid::DASH + 1;          // 213 rise / 214 fall
+            if (f.frameId != df) f.setFrame(df);
+        } else {
+            int jf = (vy < -1.f) ? fid::JUMP : (vy < 1.f) ? fid::JUMP + 1 : fid::JUMP + 2;
+            if (f.frameId != jf) f.setFrame(jf);
         }
     }
 
@@ -277,7 +300,11 @@ struct Player {
         bool heavyBlow    = itrFall >= 60;            // guard-breaking / instant fall
         bool blockedFront = isDefending() &&
                             ((kbx < 0.f) == right);   // struck from the facing side
-        if (blockedFront && !heavyBlow) return 0;     // fully guarded
+        if (blockedFront && !heavyBlow) {             // fully guarded — no damage
+            f.setFrame(fid::DEFEND + 1);              // guard-recoil shake (frame 111)
+            x = clampF(x + kbx * 0.15f, 0.f, (float)(MAP_W - SW));
+            return 0;
+        }
 
         int before = f.hp;
         int taken  = blockedFront ? dmg / 2 : dmg;    // chip through a broken guard
