@@ -35,10 +35,17 @@ vita_create_self(${PROJECT_NAME}.self ${PROJECT_NAME})
 vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   VERSION ${VITA_VERSION}
   NAME    ${VITA_APP_NAME}
-  # Custom sce_sys (icon0 + LiveArea) is DISABLED: those files make
-  # scePromoterUtil reject the package (install fails, no bubble). Until we ship
-  # Vita-spec replacements, the VPK uses VitaSDK's default sce_sys, which installs
-  # fine. Game assets + character data below are packaged normally.
+  # Custom icon + LiveArea, re-encoded as clean 8-bit RGBA (the earlier versions
+  # were rejected by scePromoterUtil → package "corrupted", no bubble). If this
+  # build fails to install again, the culprit is still here — disable these four
+  # FILE lines to fall back to VitaSDK's default sce_sys.
+  # Custom icon + LiveArea. Vita's promoter requires these as 8-bit PALETTE
+  # (indexed, colortype 3) PNGs — truecolor RGB/RGBA is rejected ("corrupted"
+  # package, no bubble). Keep any future art in that format.
+  FILE sce_sys/icon0.png                      sce_sys/icon0.png
+  FILE sce_sys/livearea/contents/bg.png       sce_sys/livearea/contents/bg.png
+  FILE sce_sys/livearea/contents/startup.png  sce_sys/livearea/contents/startup.png
+  FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
   FILE assets/dennis_0.png assets/dennis_0.png
   FILE assets/dennis_1.png assets/dennis_1.png
   FILE assets/dennis_2.png assets/dennis_2.png

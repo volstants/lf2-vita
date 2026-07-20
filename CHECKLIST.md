@@ -39,14 +39,12 @@ unifica tudo e destrava o roster.
 - [ ] Colisão unificada: ambos os lados usando `forEachItr`/`forEachBdy` (fim das caixas `Box` legadas)
 - [ ] Remover `char.hpp`/`dennis.hpp`/`enemy.hpp`/`firen.hpp` órfãos
 
-## 2. Ícone e LiveArea custom (reabilitar)
+## 2. ✅ Ícone e LiveArea custom
 
-O `sce_sys` custom faz o `scePromoterUtil` **recusar** o pacote (instala falha, sem bolha);
-por isso hoje usamos o padrão do VitaSDK.
-
-- [ ] Gerar `icon0.png` (128×128), `bg.png` (840×500), `startup.png` (280×158) em formato que a Vita aceita
-- [ ] Testar re-empacotando um de cada vez (bisecção já mapeada) até o promote aceitar
-- [ ] Reativar os `FILE sce_sys/...` no `CMakeLists`
+- [x] Causa raiz: `sce_sys` PNGs precisam ser **8-bit palette (colortype 3)** — RGB/RGBA truecolor faz o promote recusar (sem bolha)
+- [x] `icon0` (128×128), `bg` (840×500), `startup` (280×158) regerados em paleta, com branding LF2
+- [x] `FILE sce_sys/...` reativados no `CMakeLists`
+- [ ] (futuro) Arte definitiva — manter sempre em 8-bit palette
 
 ## 3. Profundidade de combate
 
