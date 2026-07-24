@@ -10,7 +10,7 @@ CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -I src
 BIN      := bin
 
-.PHONY: all test tools scan clean
+.PHONY: all test tools scan clean check-assets
 
 all: tools test
 
@@ -54,6 +54,11 @@ scan: $(BIN)/datdump
 	  ./$(BIN)/datdump "$$f" --validate || fail=1; \
 	done; \
 	echo "--- scan finished (exit $$fail)"
+
+# Spritesheet integrity audit — run whenever new character .bmp enter the repo.
+# Distinguishes benign end-of-RLE glitches from real content loss / short sheets.
+check-assets:
+	@python3 tools/check_assets.py
 
 clean:
 	rm -rf $(BIN)

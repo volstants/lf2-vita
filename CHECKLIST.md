@@ -87,7 +87,30 @@ unifica tudo e destrava o roster.
 
 ---
 
+## Integridade de assets (auditoria de sprites)
+
+Os spritesheets originais são BMPs **RLE8-comprimidos**. Vários no roster estão
+**truncados** (stream RLE termina antes do fim) — não é cosmético: os pics além
+do corte ficam **ausentes e silenciosos** (animação roda, nada aparece).
+
+Distinção importante: folha **curta** (<560 px) com decode **ok** é normal (o
+personagem só tem menos pics — ex.: `firen_2`, `henry_2`, `woody_2`). Só decode
+**CORRUPTO** é dado danificado.
+
+Folhas CORROMPIDAS detectadas (precisam de BMP íntegro do usuário):
+`bat_1`, `davis_2` (Dennis), `deep_1/2`, `freeze_2`, `jack_0`, `jan_0/1`,
+`john_2`, `julian_2`, `justin_0/1`, `knight_0/1`, `louisEX_0/2`, `mark_1`,
+`rudolf_0`, `sorcerer_0`.
+
+- [ ] **known missing: `chase_ball` do Dennis (pic 181)** — `davis_2.bmp` trunca em 800×340; sprite ausente (padding transparente evita lixo, mas NÃO é fix de dado). Aguarda `davis_2.bmp` íntegro.
+- [ ] Substituir os BMPs corrompidos acima antes de habilitar esses personagens no roster
+- [ ] (feito) `dennis_2`/`firen_1/2` reconvertidos via ImageMagick (o PIL falha em alguns RLE8) e padronizados a 800×560
+
+---
+
 ### Armadilhas mapeadas (para não redescobrir)
+- **Sprite ausente/deslocado ≠ bug de código:** quando um sprite some ou vira "linha", depois de conferir `pic`/`row`/`centerx`, **amostrar os pixels da célula** ANTES de tocar em código — a textura pode carregar e `sheetLocal` acertar, mas a célula estar vazia por trás da chave de cor (asset corrompido). Foi o caso do `davis_2`: inferir o mecanismo pelo sintoma levou a um `return`-antes-de-desenhar imaginário; o dado mostrou outro caminho pro mesmo sintoma.
+- **BMPs RLE8:** o PIL decodifica alguns errado (silenciosamente) ou falha; usar ImageMagick (`convert`) pra RLE8.
 - **Instalação/promote:** `sce_sys` custom malformado → VPK "corrompido" sem bolha. Buildar `hello_world` isola Vita vs pacote.
 - **Timing 30 vs 60 fps:** roda a 30 Hz (`TICK_MS=33`), senão anima em dobro.
 - **Folhas:** stride real dos PNGs é 80 px; fronteiras 0-69/70-139/140-209 (não `pic>=100`).

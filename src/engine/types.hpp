@@ -30,9 +30,10 @@ constexpr int     BTN_UP     = 8;
 constexpr int     BTN_DOWN   = 6;
 constexpr int     BTN_LEFT   = 7;
 constexpr int     BTN_RIGHT  = 9;
-constexpr int     BTN_ATTACK = 2;
-constexpr int     BTN_JUMP   = 1;
-constexpr int     BTN_DEFEND = 0;   // 3rd face button — adjust index on device if needed
+constexpr int     BTN_ATTACK  = 2;  // Cross
+constexpr int     BTN_JUMP    = 1;  // Circle
+constexpr int     BTN_DEFEND  = 0;  // Triangle (confirmed on device)
+constexpr int     BTN_SPECIAL = 3;  // Square — arms a special; direction fires it
 constexpr int     DEADZONE   = 8000;   // compared against SDL_JoystickGetAxis (Sint16)
 
 // ── Hit detection ─────────────────────────────────────────────────────────────

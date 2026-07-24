@@ -106,6 +106,90 @@ int main() {
     p.tick(false,false,false,false, false,false, false);  // release
     CHECK(p.state() == lf2::ST_STANDING, "releasing defend returns to standing");
 
+    // Anchor semantics: player.x IS the anchor (objectX). Across punch frames
+    // (centerx 42→27→25→35) the anchor must stay put while the draw origin
+    // shifts under it — the cell slides, the body doesn't.
+    p.f.setFrame(lf2::fid::STANDING, false); p.right = true; p.h = 0.f;
+    p.x = 500.f; p.syncAnchor();
+    p.tick(false,false,false,false, true, false);          // punch1 (frame 60, cx 42)
+    CHECK(approx(p.f.x, p.x), "fighter anchor tracks player.x exactly");
+    float dx0, dy0; p.f.drawOrigin(dx0, dy0);
+    float xBefore = p.x;
+    guard = 0;                                             // wait:2 → 3 ticks to frame 61
+    while (p.f.frameId == lf2::fid::PUNCH && guard++ < 10)
+        p.tick(false,false,false,false, false, false);
+    CHECK(p.f.frameId == lf2::fid::PUNCH + 1, "punch advanced to frame 61 (cx 27)");
+    float dx1, dy1; p.f.drawOrigin(dx1, dy1);
+    float anchorMove = p.x - xBefore;                      // frame dvx drift only
+    // Draw origin must shift by anchorMove + (cx60 - cx61) = anchorMove + 15:
+    // the CELL slides under the fixed body. Under the old cell-pinned bug this
+    // difference was 0 (cell fixed, body jittered).
+    CHECK(std::fabs((dx1 - dx0) - anchorMove - 15.f) < 0.6f,
+          "cell slides by centerx delta while the body anchor stays put");
+
+    // Walking + attack = PLAIN PUNCH (holding a direction must NOT fire specials).
+    p.f.setFrame(lf2::fid::STANDING, false); p.right = true; p.h = 0.f;
+    p.comboNext = false; p.comboQueued = false; p.seqStage = 0;
+    p.tick(false, true, false, false, true, false);       // holding forward + attack
+    CHECK(p.f.frameId == lf2::fid::PUNCH, "walk-forward + attack throws a plain punch");
+
+    // Rapid re-press BUFFERS the chain: punch2 fires when punch1 ENDS, and each
+    // chained punch is a new swing (re-arms the per-swing hit gates).
+    p.f.setFrame(lf2::fid::STANDING, false); p.comboNext = false; p.comboQueued = false;
+    p.seqStage = 0;
+    int swing0 = p.swingId;
+    p.tick(false,false,false,false, true, false);         // attack → punch1
+    CHECK(p.f.frameId == lf2::fid::PUNCH,  "attack throws punch1 (60)");
+    p.tick(false,false,false,false, true, false);         // re-press during punch1
+    CHECK(p.f.frameId >= lf2::fid::PUNCH && p.f.frameId <= lf2::fid::PUNCH + 3,
+          "re-press mid-punch buffers (does not restart the animation)");
+    guard = 0;
+    while (p.f.frameId != lf2::fid::PUNCH2 && guard++ < 60)
+        p.tick(false,false,false,false, false, false);
+    CHECK(p.f.frameId == lf2::fid::PUNCH2, "buffered chain fires punch2 when punch1 ends");
+    CHECK(p.swingId == swing0 + 2,          "chained punch counts as a new swing");
+
+    // Special = Square + direction. Mode A: direction held, tap Square → fires now.
+    p.f.setFrame(lf2::fid::STANDING, false); p.right = true; p.h = 0.f;
+    p.comboNext = false; p.comboQueued = false; p.seqStage = 0;
+    p.tick(false, true, false,false, false,false, false, true);  // hold F + Square
+    CHECK(p.f.frameId == 235, "hold-forward + Square fires hit_Fa special (235)");
+
+    // Mode B: tap Square, then tap the direction within the window.
+    // (spc is a LEVEL now — release it between taps / reset prevSpc.)
+    p.f.setFrame(lf2::fid::STANDING, false); p.seqStage = 0;
+    p.prevL = p.prevR = false; p.prevSpc = false;
+    p.tick(false,false,false,false, false,false, false, true);   // tap Square (arms)
+    p.tick(false, true, false,false, false,false, false, false); // tap forward → fires
+    CHECK(p.f.frameId == 235, "Square then forward fires hit_Fa special (235)");
+
+    // Expired window: Square, wait, then direction → just walks, no special.
+    p.f.setFrame(lf2::fid::STANDING, false); p.seqStage = 0;
+    p.prevR = false; p.prevSpc = false;
+    p.tick(false,false,false,false, false,false, false, true);   // tap Square
+    for (int i = 0; i < 20; ++i)                                  // window expires
+        p.tick(false,false,false,false, false,false, false, false);
+    p.tick(false, true, false,false, false,false, false, false); // forward after timeout
+    CHECK(p.f.frameId != 235, "expired Square window does not fire the special");
+
+    // Square + Jump = jump special (hit_Fj 280, c_foot) — and does NOT jump.
+    p.f.setFrame(lf2::fid::STANDING, false); p.right = true; p.h = 0.f;
+    p.seqStage = 0; p.prevSpc = false;
+    p.tick(false,false,false,false, false, true, false, true);   // Square + Jump together
+    CHECK(p.f.frameId == 280, "Square+Jump fires the jump special hit_Fj (280)");
+    CHECK(p.grounded(),       "jump special does not also launch a jump");
+    // ...and the armed order too: Square, then Jump.
+    p.f.setFrame(lf2::fid::STANDING, false); p.seqStage = 0; p.h = 0.f; p.prevSpc = false;
+    p.tick(false,false,false,false, false,false, false, true);   // tap Square (arms)
+    p.tick(false,false,false,false, false, true, false, false);  // tap Jump
+    CHECK(p.f.frameId == 280, "Square then Jump fires hit_Fj (280)");
+
+    // Attack alone still punches (Square is the only special trigger).
+    p.f.setFrame(lf2::fid::STANDING, false); p.seqStage = 0; p.comboNext = false;
+    p.h = 0.f; p.vy = 0.f; p.prevSpc = false;
+    p.tick(false, true, false, false, true, false, false, false); // walk + attack
+    CHECK(p.f.frameId == lf2::fid::PUNCH, "attack never fires specials without Square");
+
     // Jump attack: pressing attack in the air enters the jump-attack frames.
     p.f.setFrame(lf2::fid::STANDING, false); p.h = 0.f; p.vy = 0.f;
     p.tick(false,false,false,false, false, true);         // jump

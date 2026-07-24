@@ -27,15 +27,23 @@ static inline Box toBox(const lf2::WBox& w) {
 
 // First attacking itr (kind 0) of the actor's current frame, in world space.
 // Only present during attack frames, so it doubles as "is this actor striking?".
-// Reports the itr's `injury` (damage) and `fall` (knockdown weight).
-static bool actorAttack(const lf2::Player& p, Box& out, int& injury, int& fall) {
+struct HitInfo {
+    Box box;
+    int injury = 20;   // damage
+    int fall   = -1;   // knockdown weight
+    int dvx    = 0;    // victim knockback (facing-signed by the caller)
+    int rest   = 8;    // re-hit delay: vrest (per victim) or arest, default 8 ticks
+};
+static bool actorAttack(const lf2::Player& p, HitInfo& out) {
     bool found = false;
     p.f.forEachItr([&](const lf2::WBox& wb, const dat::Itr& it) {
         if (it.kind == 0 && !found) {
-            out    = toBox(wb);
-            injury = it.injury > 0 ? it.injury : 20;
-            fall   = it.fall;
-            found  = true;
+            out.box    = toBox(wb);
+            out.injury = it.injury > 0 ? it.injury : 20;
+            out.fall   = it.fall;
+            out.dvx    = it.dvx;
+            out.rest   = it.vrest > 0 ? it.vrest : (it.arest > 0 ? it.arest : 8);
+            found = true;
         }
     });
     return found;
@@ -53,7 +61,7 @@ static bool actorBody(const lf2::Player& p, Box& out) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  Input helpers (PS Vita joystick → bool directions / buttons)
 // ─────────────────────────────────────────────────────────────────────────────
-struct InputState { bool L, R, U, D, atk, jmp, def, any; };
+struct InputState { bool L, R, U, D, atk, jmp, def, spc, any; };
 
 static InputState readInput(SDL_Joystick* joy) {
     InputState in{};
@@ -74,7 +82,8 @@ static InputState readInput(SDL_Joystick* joy) {
     in.atk = SDL_JoystickGetButton(joy, BTN_ATTACK);
     in.jmp = SDL_JoystickGetButton(joy, BTN_JUMP);
     in.def = SDL_JoystickGetButton(joy, BTN_DEFEND);
-    in.any = in.atk || in.jmp || in.def || in.L || in.R || in.U || in.D;
+    in.spc = SDL_JoystickGetButton(joy, BTN_SPECIAL);
+    in.any = in.atk || in.jmp || in.def || in.spc || in.L || in.R || in.U || in.D;
     return in;
 }
 
@@ -106,16 +115,21 @@ struct Textures {
         forestm3 = loadTex(r, "app0:/assets/forestm3.png", true, 0, 0, 0);
         forestm4 = loadTex(r, "app0:/assets/forestm4.png", true, 0, 0, 0);
         foresett = loadTex(r, "app0:/assets/forestt.png",  true, 0, 0, 0);
-        land1    = loadTex(r, "app0:/assets/land1.png",    false);
+        // land1/land4 ship with black transparent backgrounds (land2 is green-
+        // backed): drawing them opaque punches black holes in the ground.
+        land1    = loadTex(r, "app0:/assets/land1.png",    true, 0, 0, 0);
         land2    = loadTex(r, "app0:/assets/land2.png",    false);
-        land4    = loadTex(r, "app0:/assets/land4.png",    false);
-        dennis[0] = loadTex(r, "app0:/assets/dennis_0.png");            // magenta
-        dennis[1] = loadTex(r, "app0:/assets/dennis_1.png");
-        dennis[2] = loadTex(r, "app0:/assets/dennis_2.png");
-        firen[0]  = loadTex(r, "app0:/assets/firen_0.png", true, 0, 0, 0); // black
-        firen[1]  = loadTex(r, "app0:/assets/firen_1.png", true, 0, 0, 0);
-        firen[2]  = loadTex(r, "app0:/assets/firen_2.png", true, 0, 0, 0);
-        shadow    = loadTex(r, "app0:/assets/s.png",       false);
+        land4    = loadTex(r, "app0:/assets/land4.png",    true, 0, 0, 0);
+        // All sheets now come straight from the ORIGINAL LF2 BMPs, whose
+        // transparent background is pure BLACK (the old magenta sheets were
+        // pre-processed exports and are gone).
+        dennis[0] = loadTex(r, "app0:/assets/dennis_0.png", true, 0, 0, 0);
+        dennis[1] = loadTex(r, "app0:/assets/dennis_1.png", true, 0, 0, 0);
+        dennis[2] = loadTex(r, "app0:/assets/dennis_2.png", true, 0, 0, 0);
+        firen[0]  = loadTex(r, "app0:/assets/firen_0.png",  true, 0, 0, 0);
+        firen[1]  = loadTex(r, "app0:/assets/firen_1.png",  true, 0, 0, 0);
+        firen[2]  = loadTex(r, "app0:/assets/firen_2.png",  true, 0, 0, 0);
+        shadow    = loadTex(r, "app0:/assets/s.png", true, 0, 0, 0); // ellipse on black
     }
 };
 
@@ -157,10 +171,12 @@ static void renderCharacters(SDL_Renderer* r, const Textures& tx,
                              const lf2::Player& player, Enemy enemies[], int camX)
 {
     if (tx.shadow) {
-        SDL_Rect ps = { (int)player.x - camX + 12, (int)player.z - 6, 56, 12 };
+        // player.x is the anchor (sprite middle). Shadow at its native size from
+        // the bg.dat spec (shadowsize: 37 9), centered under the anchor.
+        SDL_Rect ps = { (int)player.x - camX - 18, (int)player.z - 4, 37, 9 };
         SDL_RenderCopy(r, tx.shadow, nullptr, &ps);
         for (int i = 0; i < NUM_ENEMIES; i++) {
-            SDL_Rect es = { (int)enemies[i].a.x - camX + 12, (int)enemies[i].a.z - 6, 56, 12 };
+            SDL_Rect es = { (int)enemies[i].a.x - camX - 18, (int)enemies[i].a.z - 4, 37, 9 };
             SDL_RenderCopy(r, tx.shadow, nullptr, &es);
         }
     }
@@ -297,7 +313,7 @@ int main(int, char*[]) {
     bool   playerWon     = false;
 
     bool prevAtk = false, prevJmp = false, prevAny = false;
-    bool prevPlayerAttacking = false;   // rising edge = new player swing
+    int  lastSwingId = -1;   // player.swingId tracker → re-arms per-swing hit gates
 
     Uint32 nextTick = SDL_GetTicks();
     bool   running  = true;
@@ -320,30 +336,37 @@ int main(int, char*[]) {
                 if (anyPress) resetGame(player, enemies, gameSt);
             }
             else if (gameSt == GameSt::PLAYING) {
-                player.tick(raw.L, raw.R, raw.U, raw.D, atk, jmp, raw.def);
+                // NOTE: spc is passed as LEVEL (held state) — the Player computes
+                // its own edge and supports held-Square + direction/jump combos.
+                player.tick(raw.L, raw.R, raw.U, raw.D, atk, jmp, raw.def, raw.spc);
                 for (int i = 0; i < NUM_ENEMIES; i++)
                     enemies[i].tick(player.x, player.z);
 
-                // New player swing → each enemy is vulnerable to it once.
-                bool attacking = (player.state() == lf2::ST_ATTACK);
-                if (attacking && !prevPlayerAttacking)
-                    for (int i = 0; i < NUM_ENEMIES; i++) enemies[i].hitByPlayer = false;
-                prevPlayerAttacking = attacking;
+                // New player swing (any attack start, INCLUDING chained punches)
+                // clears the re-hit timers, re-arming every enemy immediately.
+                if (player.swingId != lastSwingId) {
+                    for (int i = 0; i < NUM_ENEMIES; i++) enemies[i].rehitTimer = 0;
+                    lastSwingId = player.swingId;
+                }
 
-                // ── Player attack → enemy body ────────────────────────────────
-                Box atkBox; int atkInjury = 0, atkFall = -1;
-                if (actorAttack(player, atkBox, atkInjury, atkFall)) {
+                // ── Player attack → enemy bodies ──────────────────────────────
+                // Re-hit is timer-gated (itr vrest/arest), NOT once-per-swing:
+                // multi-hit moves (many_foot flurry) land repeatedly, and the
+                // knockback comes from the itr's own dvx (2 = nudge that keeps
+                // the victim in the combo; 12 = the finisher's launch).
+                HitInfo hi;
+                if (actorAttack(player, hi)) {
                     for (int i = 0; i < NUM_ENEMIES; i++) {
                         Box ebody;
-                        if (!enemies[i].hitByPlayer && enemies[i].alive() &&
+                        if (enemies[i].rehitTimer == 0 && enemies[i].alive() &&
                             fabsf(player.z - enemies[i].a.z) <= 12.f &&
                             actorBody(enemies[i].a, ebody) &&
-                            boxOverlap(atkBox, ebody))
+                            boxOverlap(hi.box, ebody))
                         {
-                            enemies[i].hitByPlayer = true;
-                            enemies[i].hitFlash    = 15;
-                            float kbx = player.right ? 30.f : -30.f;
-                            enemies[i].a.hit(atkInjury, kbx, atkFall);
+                            enemies[i].rehitTimer = hi.rest;
+                            enemies[i].hitFlash   = 10;
+                            float kb = (float)(hi.dvx > 0 ? hi.dvx : 1);
+                            enemies[i].a.hit(hi.injury, player.right ? kb : -kb, hi.fall);
                         }
                     }
                 }
@@ -352,15 +375,15 @@ int main(int, char*[]) {
                 Box pBody;
                 if (player.alive() && actorBody(player, pBody)) {
                     for (int i = 0; i < NUM_ENEMIES; i++) {
-                        Box eatk; int einj = 0, efall = -1;
+                        HitInfo ehi;
                         if (!enemies[i].hasHitPlayer && enemies[i].alive() &&
                             fabsf(player.z - enemies[i].a.z) <= 12.f &&
-                            actorAttack(enemies[i].a, eatk, einj, efall) &&
-                            boxOverlap(eatk, pBody))
+                            actorAttack(enemies[i].a, ehi) &&
+                            boxOverlap(ehi.box, pBody))
                         {
                             enemies[i].hasHitPlayer = true;
-                            float kbx = enemies[i].a.right ? 30.f : -30.f;
-                            player.hit(einj, kbx, efall);
+                            float kb = (float)(ehi.dvx > 0 ? ehi.dvx : 1);
+                            player.hit(ehi.injury, enemies[i].a.right ? kb : -kb, ehi.fall);
                         }
                     }
                 }

@@ -26,7 +26,8 @@ namespace fid {
     constexpr int WALK_LAST = 8;
     constexpr int RUNNING   = 9;   // 9-11
     constexpr int RUN_LAST  = 11;
-    constexpr int PUNCH       = 60; // basic attack
+    constexpr int PUNCH       = 60; // punch 1 (60-63)
+    constexpr int PUNCH2      = 65; // punch 2 (65-68) — combo alternates 60/65
     constexpr int JUMP_ATTACK = 80; // 80-82 (state 3)
     constexpr int RUN_ATTACK  = 85; // running attack
     constexpr int DASH_ATTACK = 90; // 90-92 (state 15)
@@ -58,13 +59,30 @@ struct Player {
     int   fallValue = FALL_MAX;
 
     // Input edge / double-tap-to-run tracking.
-    bool  prevL = false, prevR = false;
+    bool  prevL = false, prevR = false, prevU = false, prevDn = false, prevDef = false,
+          prevSpc = false;
     int   tapDir = 0, tapTimer = 0;
     static constexpr int RUN_TAP_WINDOW = 9;   // ticks to land the 2nd tap (~0.3s)
+
+    // Special input: SQUARE arms it, a direction fires it. Both orders work —
+    // hold a direction and tap Square (fires immediately), or tap Square then a
+    // direction within the window. Attack alone NEVER fires specials.
+    int   seqStage = 0;    // 0 idle · 1 = Square armed, waiting for a direction
+    int   seqTimer = 0;
+    int   wantSpecial = 0; // per-tick: 1 = F (sets facing) · 2 = Up · 3 = Down
+    bool  wantRight = true;
+    static constexpr int SEQ_WINDOW = 15;      // ~0.5 s to press the direction
+
+    // Attack-swing counter: bumped every time a NEW swing starts (punch, chained
+    // punch, run/air attack, special). main.cpp uses it to re-arm per-swing hit
+    // gates — without it, chained punches after the first never connect.
+    int   swingId = 0;
+    bool  comboQueued = false;                 // atk pressed during a punch → chain at its end
 
     // Locomotion animation cursor (walking/running cycle their own frames; the
     // frame-graph `next` only handles idle/attacks).
     int   animTimer = 0;
+    bool  comboNext = false;   // which punch the next basic attack throws (60/65)
 
     // Stats pulled from the character header (fall back to Dennis defaults).
     float walkSpeed  = 5.0f;
@@ -108,28 +126,60 @@ struct Player {
     bool alive() const { return !dead(); }
 
     // Keep the Fighter's anchor aligned with the world model each tick so its
-    // boxes / draw origin are correct. Sprite-left = x, foot line = z + h;
-    // the Fighter anchor is the sprite's (centerx, centery) point.
+    // boxes / draw origin are correct. player.x IS the anchor (LF2's objectX:
+    // the frame's centerx point), and z + h is the foot line (centery row).
+    // The Fighter does ALL centerx/centery math itself (drawOrigin/worldBox);
+    // pre-transforming here would cancel it out and pin the CELL instead of the
+    // anchor — which made frames with varying centerx (kicks: 20-42) jitter.
     void syncAnchor() {
-        const dat::Frame* fr = f.cur();
-        int cx = fr ? fr->centerx : 0, cy = fr ? fr->centery : 0;
         f.facingRight = right;
-        f.x = x + cx;
-        f.y = (z + h - (float)SH) + cy;
+        f.x = x;
+        f.y = z + h;
     }
 
     void clampPos() {
-        x = clampF(x, 0.f, (float)(MAP_W - SW));
+        // x is the anchor (~sprite middle), so clamp by half a cell each side.
+        x = clampF(x, (float)(SW / 2), (float)(MAP_W - SW / 2));
         z = clampF(z, (float)Z_MIN, (float)Z_MAX);
     }
 
     // ── Per-tick update (run at 30 Hz) ───────────────────────────────────────
-    void tick(bool L, bool R, bool U, bool D, bool atk, bool jmp, bool def = false) {
+    void tick(bool L, bool R, bool U, bool D, bool atk, bool jmp,
+              bool def = false, bool spc = false) {
         // Input edge + double-tap bookkeeping (every tick).
         bool newL = L && !prevL, newR = R && !prevR;
-        prevL = L; prevR = R;
+        bool newU = U && !prevU, newDn = D && !prevDn;
+        prevL = L; prevR = R; prevU = U; prevDn = D;
         if (tapTimer > 0) --tapTimer;
         if (fallValue < FALL_MAX) ++fallValue;   // knockdown budget regenerates
+
+        // Special machine. `spc` is the Square LEVEL (held state); edges are
+        // computed here. Three ways to fire, so human timing never drops one:
+        //   1. Square pressed while a direction/jump is already held → fires now.
+        //   2. Direction/Jump tapped while Square is HELD → fires (Smash-style).
+        //   3. Square tapped alone → arms for SEQ_WINDOW; next dir/jump fires.
+        // Square+Jump = the jump special (hit_Fj — c_foot), mirroring D>J.
+        bool newSpc = spc && !prevSpc; prevSpc = spc;
+        wantSpecial = 0;
+        if (seqTimer > 0) --seqTimer; else seqStage = 0;
+        if (newSpc) {
+            if      (U)      { wantSpecial = 2; }
+            else if (D)      { wantSpecial = 3; }
+            else if (L || R) { wantSpecial = 1; wantRight = R; }
+            else if (jmp)    { wantSpecial = 4; }
+            else             { seqStage = 1; seqTimer = SEQ_WINDOW; }  // arm, await dir/jump
+        } else if (spc) {                       // Square HELD: any new press fires
+            if      (newU)         { wantSpecial = 2; }
+            else if (newDn)        { wantSpecial = 3; }
+            else if (newL || newR) { wantSpecial = 1; wantRight = newR; }
+            else if (jmp)          { wantSpecial = 4; }
+        } else if (seqStage == 1) {             // armed by an earlier tap
+            if      (newU)         { wantSpecial = 2; seqStage = 0; }
+            else if (newDn)        { wantSpecial = 3; seqStage = 0; }
+            else if (newL || newR) { wantSpecial = 1; wantRight = newR; seqStage = 0; }
+            else if (jmp)          { wantSpecial = 4; seqStage = 0; }
+        }
+        bool jumpConsumed = (wantSpecial == 4);   // don't ALSO jump on a jump special
 
         if (!grounded()) { airborneTick(U, D, atk); syncAnchor(); return; }
 
@@ -143,8 +193,10 @@ struct Player {
         }
 
         // Guarding: hold the idle guard (110) while held; if a blocked hit bumped
-        // us to the block-recoil (111), let it animate back to 110.
+        // us to the block-recoil (111), let it animate back to 110. A command
+        // sequence may complete while the guard is still up (D held, then dir+A).
         if (s == ST_DEFEND) {
+            if (trySpecial()) { syncAnchor(); return; }
             if      (!def)                     f.setFrame(fid::STANDING); // dropped guard
             else if (f.frameId != fid::DEFEND) f.advance();              // recoil 111 → 110
             syncAnchor();
@@ -155,12 +207,15 @@ struct Player {
         if (s == ST_RUNNING) { runTick(L, R, U, D, atk, jmp); syncAnchor(); return; }
 
         if (s == ST_STANDING || s == ST_WALKING) {
-            if (def)      { f.setFrame(fid::DEFEND); }   // raise guard (blocks move/atk)
-            else if (atk) { f.setFrame(fid::PUNCH); }
-            else if (jmp) { startJump(L || R); }
+            if (L) right = false;
+            if (R) right = true;
+            if (trySpecial()) { }                        // Square + direction/jump
+            else if (def) { f.setFrame(fid::DEFEND); }   // raise guard (blocks move/atk)
+            else if (atk) { throwPunch(); }              // plain attack = punch, ALWAYS
+            else if (jmp && !jumpConsumed) { startJump(L || R); }
             else {
-                if (L) right = false;
-                if (R) right = true;
+                comboNext = false;                       // idle → next attack starts fresh
+                comboQueued = false;
 
                 // Double-tap the facing direction within the window → run.
                 if      (newR && tapDir ==  1 && tapTimer > 0) { enterRun(); }
@@ -185,15 +240,48 @@ struct Player {
             }
         }
         else {
-            // attack / dash / defend / injured …: drift by the frame's own dv
-            // and animate back to standing via the frame graph's next:999.
+            // Attack frames: pressing attack again during a punch BUFFERS the
+            // chain; the alternate punch (60 ↔ 65) fires when this one finishes
+            // — LF2's rapid-press punch1/punch2 combo. Everything else (special
+            // / injured …) drifts by the frame's dv and follows the next-graph.
+            if (atk && inPunch()) comboQueued = true;
+            bool wasPunch = inPunch();
             x += f.vx;
             clampPos();
             f.advance();
+            if (wasPunch && comboQueued && !inPunch()) {   // punch just ended
+                throwPunch();
+                comboQueued = false;
+            }
         }
 
         syncAnchor();
     }
+
+    // ── Attacks ───────────────────────────────────────────────────────────────
+    // Specials fire ONLY via Square: +direction → hit_Fa/Ua/Da, +Jump → hit_Fj
+    // (the jump special, e.g. Dennis's c_foot). NOTE: projectile specials
+    // (fireball/chase) animate but emit nothing until opoint lands.
+    bool trySpecial() {
+        if (!wantSpecial) return false;
+        const dat::Frame* fr = f.cur();
+        if (!fr) { wantSpecial = 0; return false; }
+        if (wantSpecial == 1) right = wantRight;   // F-special faces the pressed side
+        int id = (wantSpecial == 1) ? fr->hit_Fa
+               : (wantSpecial == 2) ? fr->hit_Ua
+               : (wantSpecial == 3) ? fr->hit_Da : fr->hit_Fj;
+        wantSpecial = 0;                           // consumed either way
+        if (id <= 0) return false;
+        f.setFrame(id);
+        ++swingId;
+        return true;
+    }
+    void throwPunch() {
+        f.setFrame(comboNext ? fid::PUNCH2 : fid::PUNCH);
+        comboNext = !comboNext;
+        ++swingId;
+    }
+    bool inPunch() const { return f.frameId >= fid::PUNCH && f.frameId <= fid::PUNCH2 + 3; }
 
     // ── Airborne integration (jump + knockdown) ──────────────────────────────
     // Physics take over whenever off the ground, INDEPENDENT of the animation
@@ -222,6 +310,7 @@ struct Player {
         // Attack pressed in the air → jump attack, or dash attack from a dash.
         if (atk) {
             f.setFrame(s == ST_DASH ? fid::DASH_ATTACK : fid::JUMP_ATTACK);
+            ++swingId;
             return;
         }
         // Otherwise pick the airborne pose by vertical velocity. Walking the
@@ -238,8 +327,9 @@ struct Player {
 
     // ── Running ──────────────────────────────────────────────────────────────
     void runTick(bool L, bool R, bool U, bool D, bool atk, bool jmp) {
-        if (atk) { f.setFrame(fid::RUN_ATTACK); return; }  // running attack, not stand punch
-        if (jmp) { startDash();                 return; }  // running jump = dash
+        if (trySpecial()) return;                                     // Square works mid-run
+        if (atk) { f.setFrame(fid::RUN_ATTACK); ++swingId; return; }  // running attack
+        if (jmp) { startDash();                            return; }  // running jump = dash
         bool keepDir = right ? (R && !L) : (L && !R);
         if (!keepDir) { f.setFrame(fid::STANDING); return; }
         x += right ? runSpeed : -runSpeed;
@@ -302,7 +392,7 @@ struct Player {
                             ((kbx < 0.f) == right);   // struck from the facing side
         if (blockedFront && !heavyBlow) {             // fully guarded — no damage
             f.setFrame(fid::DEFEND + 1);              // guard-recoil shake (frame 111)
-            x = clampF(x + kbx * 0.15f, 0.f, (float)(MAP_W - SW));
+            x += kbx * 0.15f; clampPos();
             return 0;
         }
 
@@ -314,17 +404,20 @@ struct Player {
         if (blockedFront && heavyBlow) { f.setFrame(fid::BROKEN_DEF); return lost; }
 
         // Spend the fall budget. Knockdown only once it runs out (or on death);
-        // otherwise stagger in place and keep taking hits.
+        // otherwise stagger in place and keep taking hits. `kbx` now carries the
+        // itr's own dvx (facing-signed): flurry hits (dvx 2) barely move the
+        // victim — keeping it inside the combo — while finishers (dvx 12) launch.
         fallValue -= itrFall;
         if (fallValue <= 0 || f.hp <= 0) {            // knockdown
             fallValue   = FALL_MAX;
             knockedDown = true;
             f.setFrame(fid::FALLING);
             h = -0.1f; vy = -8.f;
-            f.vx = (kbx < 0.f ? -6.f : 6.f);
+            float lv = std::fabs(kbx); if (lv < 6.f) lv = 6.f;   // visible launch floor
+            f.vx = (kbx < 0.f ? -lv : lv);
         } else {                                      // stagger in place
             f.setFrame(fid::INJURED);
-            x = clampF(x + kbx * 0.25f, 0.f, (float)(MAP_W - SW));   // small nudge only
+            x += kbx; clampPos();                     // dvx-sized nudge (a few px)
         }
         return lost;
     }

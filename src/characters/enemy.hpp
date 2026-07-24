@@ -19,8 +19,11 @@ struct Enemy {
     int  aiCooldown  = 60;       // ticks before it may attack again
     float aimOffset  = 0.f;      // horizontal standoff so the trio doesn't stack
 
-    // Per-swing hit gates (mirror the player's newAttack/hitByPlayer handling).
-    bool hitByPlayer = false;    // already hit by the player's current swing?
+    // Hit gating. LF2 re-hit model: after connecting, an itr can't re-hit the
+    // same victim until its vrest/arest ticks expire — that's what makes
+    // multi-hit moves (many_foot's flurry) land several times while single
+    // punches land once. A new player swing clears the timer immediately.
+    int  rehitTimer  = 0;        // ticks until the player's attacks may hit again
     bool hasHitPlayer = false;   // already landed on the player this swing?
     bool wasAttacking = false;
     bool newSwing     = false;   // true only on the tick an attack starts
@@ -36,6 +39,7 @@ struct Enemy {
     void tick(float tx, float tz) {
         if (hitFlash   > 0) hitFlash--;
         if (aiCooldown > 0) aiCooldown--;
+        if (rehitTimer > 0) rehitTimer--;
 
         int s = a.state();
         bool reacting = !a.alive() ||

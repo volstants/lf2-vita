@@ -54,6 +54,9 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   FILE assets/firen_2.png  assets/firen_2.png
   FILE data/dennis.dat     data/dennis.dat
   FILE data/firen.dat      data/firen.dat
+  # Lion Forest background layers (converted from bg/sys/lf originals) + shadow.
+  # These got dropped in a concurrent rewrite — without them the game renders a
+  # bare green floor and no shadows.
   FILE assets/forests.png  assets/forests.png
   FILE assets/forestm1.png assets/forestm1.png
   FILE assets/forestm2.png assets/forestm2.png
@@ -64,4 +67,9 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   FILE assets/land2.png    assets/land2.png
   FILE assets/land4.png    assets/land4.png
   FILE assets/s.png        assets/s.png
+  # Scenery: the old pre-baked forest/land PNGs are gone (assets wiped and
+  # re-sourced from the original LF2). Backgrounds will come data-driven from
+  # bg\sys\<stage>\bg.dat once the user copies the original bg/ folder in —
+  # including the per-stage shadow bitmap. Until then the game renders a plain
+  # ground (renderBackground tolerates missing textures).
 )
