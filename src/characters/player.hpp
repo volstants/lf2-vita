@@ -351,10 +351,8 @@ struct Player {
         clampPos();
         if (grounded()) {                       // landed this tick
             h = 0.f; vy = 0.f; f.vx = 0.f;
-            int ls = f.state();
-            // Landing mid air-attack: let the swing finish on the ground instead
-            // of snapping to standing (dash/jump attacks cut short otherwise).
-            if (!knockedDown && (ls == ST_ATTACK || ls == ST_SPECIAL)) { f.advance(); return; }
+            // Landing ends an air attack (faithful to LF2/F.LF: touching the
+            // ground snaps you out of the swing — do NOT let it finish airborne).
             f.setFrame(knockedDown ? fid::LYING : fid::STANDING);
             return;
         }
