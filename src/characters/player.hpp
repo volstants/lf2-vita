@@ -55,8 +55,11 @@ struct Player {
     // `fall`) and that regenerates over time. Weak hits stagger in place; only
     // when the budget runs out does the actor get knocked down — so a rapid
     // combo floors you but spaced single hits don't.
-    static constexpr int FALL_MAX = 60;
-    int   fallValue = FALL_MAX;
+    // LF2 Falling Points: start 0, a hit ADDS the itr's `fall`, decays 1/frame.
+    // FP > 40 → Dance of Pain (stunned in place); FP > 60 → knocked down, FP=0.
+    // (Community-documented; z-band/anti-juggle cross-checked in OpenLF2.)
+    static constexpr int FP_DOP = 40, FP_FALL = 60;
+    int   fp = 0;
 
     // Input edge / double-tap-to-run tracking.
     bool  prevL = false, prevR = false, prevU = false, prevDn = false, prevDef = false,
@@ -83,6 +86,7 @@ struct Player {
     // frame-graph `next` only handles idle/attacks).
     int   animTimer = 0;
     bool  comboNext = false;   // which punch the next basic attack throws (60/65)
+    int   mpRegenAcc = 0;      // MP regen divider (1 MP every other tick)
 
     // Stats pulled from the character header (fall back to Dennis defaults).
     float walkSpeed  = 5.0f;
@@ -135,6 +139,7 @@ struct Player {
         f.facingRight = right;
         f.x = x;
         f.y = z + h;
+        f.z = z;        // depth — opoint spawns read this; without it balls fire at z=0
     }
 
     void clampPos() {
@@ -151,7 +156,9 @@ struct Player {
         bool newU = U && !prevU, newDn = D && !prevDn;
         prevL = L; prevR = R; prevU = U; prevDn = D;
         if (tapTimer > 0) --tapTimer;
-        if (fallValue < FALL_MAX) ++fallValue;   // knockdown budget regenerates
+        if (fp > 0) --fp;                        // falling points decay 1/frame
+        if ((++mpRegenAcc & 1) == 0 && f.mp < f.maxMp) ++f.mp;   // ~15 MP/s regen
+        if (f.removed) { f.removed = false; f.setFrame(fid::STANDING); }   // 1000-code safety
 
         // Special machine. `spc` is the Square LEVEL (held state); edges are
         // computed here. Three ways to fire, so human timing never drops one:
@@ -159,7 +166,7 @@ struct Player {
         //   2. Direction/Jump tapped while Square is HELD → fires (Smash-style).
         //   3. Square tapped alone → arms for SEQ_WINDOW; next dir/jump fires.
         // Square+Jump = the jump special (hit_Fj — c_foot), mirroring D>J.
-        bool newSpc = spc && !prevSpc; prevSpc = spc;
+        bool newSpc = spc && !prevSpc, relSpc = !spc && prevSpc; prevSpc = spc;
         wantSpecial = 0;
         if (seqTimer > 0) --seqTimer; else seqStage = 0;
         if (newSpc) {
@@ -179,6 +186,10 @@ struct Player {
             else if (newL || newR) { wantSpecial = 1; wantRight = newR; seqStage = 0; }
             else if (jmp)          { wantSpecial = 4; seqStage = 0; }
         }
+        // Square TAPPED alone (armed then released, no direction) → the neutral
+        // special = the character's forward special (hit_Fa). Gives every fighter
+        // its signature move on a single button.
+        if (relSpc && seqStage == 1) { wantSpecial = 1; seqStage = 0; }
         bool jumpConsumed = (wantSpecial == 4);   // don't ALSO jump on a jump special
 
         if (!grounded()) { airborneTick(U, D, atk); syncAnchor(); return; }
@@ -245,10 +256,40 @@ struct Player {
             // — LF2's rapid-press punch1/punch2 combo. Everything else (special
             // / injured …) drifts by the frame's dv and follows the next-graph.
             if (atk && inPunch()) comboQueued = true;
+
+            // Generic in-move branches from the frame's own hit_* table: looping
+            // specials (c_foot 284→287→284) expose their EXIT on hit_d/hit_j
+            // (288) — pressing Defend or Jump bails out of the loop early.
+            const dat::Frame* frNow = f.cur();
+            if (frNow) {
+                if      (def && frNow->hit_d > 0) { f.setFrame(frNow->hit_d); syncAnchor(); return; }
+                else if (jmp && frNow->hit_j > 0) { f.setFrame(frNow->hit_j); syncAnchor(); return; }
+                else if (atk && !inPunch() && frNow->hit_a > 0) {
+                    f.setFrame(frNow->hit_a); ++swingId; syncAnchor(); return;
+                }
+            }
+
             bool wasPunch = inPunch();
+            int  before   = f.frameId;
             x += f.vx;
             clampPos();
             f.advance();
+
+            // MP-drain frames (mp < 0, e.g. c_foot's -17): entering one costs
+            // |mp| — that's what breaks the .dat's intentional infinite loop.
+            // Out of MP → exit via the frame's hit_d (288) or, failing that,
+            // straight to standing. Without this the whirlwind slides forever.
+            if (f.frameId != before) {
+                const dat::Frame* fr = f.cur();
+                if (fr && fr->mp < 0) {
+                    if (f.mp + fr->mp < 0) {
+                        f.setFrame(fr->hit_d > 0 ? fr->hit_d : fid::STANDING);
+                    } else {
+                        f.mp += fr->mp;
+                    }
+                }
+            }
+
             if (wasPunch && comboQueued && !inPunch()) {   // punch just ended
                 throwPunch();
                 comboQueued = false;
@@ -259,20 +300,32 @@ struct Player {
     }
 
     // ── Attacks ───────────────────────────────────────────────────────────────
-    // Specials fire ONLY via Square: +direction → hit_Fa/Ua/Da, +Jump → hit_Fj
-    // (the jump special, e.g. Dennis's c_foot). NOTE: projectile specials
-    // (fireball/chase) animate but emit nothing until opoint lands.
+    // Square specials, each direction trying its attack-slot then its jump-slot
+    // so characters that put a move on the "j" slot (Louis's up = hit_Uj, etc.)
+    // still fire. Neutral Square = forward. NOTE: projectile specials animate;
+    // their object is emitted by the opoint system.
     bool trySpecial() {
         if (!wantSpecial) return false;
         const dat::Frame* fr = f.cur();
         if (!fr) { wantSpecial = 0; return false; }
         if (wantSpecial == 1) right = wantRight;   // F-special faces the pressed side
-        int id = (wantSpecial == 1) ? fr->hit_Fa
-               : (wantSpecial == 2) ? fr->hit_Ua
-               : (wantSpecial == 3) ? fr->hit_Da : fr->hit_Fj;
+        auto pick = [](int a, int j) { return a > 0 ? a : j; };
+        int id = (wantSpecial == 1) ? pick(fr->hit_Fa, fr->hit_Fj)
+               : (wantSpecial == 2) ? pick(fr->hit_Ua, fr->hit_Uj)
+               : (wantSpecial == 3) ? pick(fr->hit_Da, fr->hit_Dj)
+               :                      pick(fr->hit_Fj, fr->hit_ja);  // Square+Jump
         wantSpecial = 0;                           // consumed either way
         if (id <= 0) return false;
-        f.setFrame(id);
+        // MP gate: the move's entry frame declares its cost. Not enough → the
+        // input just whiffs (like the original when the blue bar runs dry).
+        const dat::Frame* tf = f.data ? f.data->frame(id) : nullptr;
+        int cost = tf ? tf->mp : 0;
+        if (cost > 0) {
+            if (f.mp < cost) return false;
+            f.mp -= cost;
+        }
+        f.vx = 0.f;                // clear stale momentum; the frame's own dvx
+        f.setFrame(id);            // (blastpush=0) then decides movement
         ++swingId;
         return true;
     }
@@ -298,6 +351,10 @@ struct Player {
         clampPos();
         if (grounded()) {                       // landed this tick
             h = 0.f; vy = 0.f; f.vx = 0.f;
+            int ls = f.state();
+            // Landing mid air-attack: let the swing finish on the ground instead
+            // of snapping to standing (dash/jump attacks cut short otherwise).
+            if (!knockedDown && (ls == ST_ATTACK || ls == ST_SPECIAL)) { f.advance(); return; }
             f.setFrame(knockedDown ? fid::LYING : fid::STANDING);
             return;
         }
@@ -403,19 +460,27 @@ struct Player {
 
         if (blockedFront && heavyBlow) { f.setFrame(fid::BROKEN_DEF); return lost; }
 
-        // Spend the fall budget. Knockdown only once it runs out (or on death);
-        // otherwise stagger in place and keep taking hits. `kbx` now carries the
-        // itr's own dvx (facing-signed): flurry hits (dvx 2) barely move the
-        // victim — keeping it inside the combo — while finishers (dvx 12) launch.
-        fallValue -= itrFall;
-        if (fallValue <= 0 || f.hp <= 0) {            // knockdown
-            fallValue   = FALL_MAX;
+        // Falling Points: each hit adds its `fall`. Over 60 (or death) → knocked
+        // down; otherwise stay up and keep taking hits (a flurry accumulates FP
+        // until it crosses 60). `kbx` carries the itr's own dvx (facing-signed):
+        // flurry hits (dvx 2) barely nudge — keeping the victim in the combo —
+        // while a launcher (dvx 12/fall 70) crosses 60 at once and throws.
+        fp += itrFall;
+        if (fp > FP_FALL || f.hp <= 0) {              // knockdown / juggle
+            fp = 0;
+            bool juggle = knockedDown;                // already airborne = re-hit
             knockedDown = true;
             f.setFrame(fid::FALLING);
-            h = -0.1f; vy = -8.f;
-            float lv = std::fabs(kbx); if (lv < 6.f) lv = 6.f;   // visible launch floor
+            h = juggle ? h : -0.1f;
+            vy = juggle ? -6.f : -8.f;                // re-loft
+            // Juggle hits keep the victim in place (re-loft only); the FIRST
+            // launch carries the itr's horizontal knockback.
+            float lv = juggle ? 0.f : std::fabs(kbx);
+            if (!juggle && lv < 6.f) lv = 6.f;
             f.vx = (kbx < 0.f ? -lv : lv);
-        } else {                                      // stagger in place
+        } else {                                      // injured / Dance of Pain
+            // FP>40 = the longer DoP stun; below, a brief flinch. Both use the
+            // injured frames (220→221→standing); DoP's extra length is a refinement.
             f.setFrame(fid::INJURED);
             x += kbx; clampPos();                     // dvx-sized nudge (a few px)
         }

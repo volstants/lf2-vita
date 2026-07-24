@@ -24,6 +24,7 @@ namespace lf2 {
 
 // ── Frame-graph sentinels (observed in the original data) ────────────────────
 constexpr int NEXT_STANDING  = 999;   // `next: 999` → return to standing frame
+constexpr int NEXT_REMOVE    = 1000;  // `next: 1000` → remove the object (balls)
 constexpr int STANDING_FRAME = 0;     // characters' standing frame id
 
 // Frame dv* semantics (as told apart in the real files):
@@ -77,15 +78,17 @@ struct Fighter {
     // Frame-graph cursor.
     int   frameId = STANDING_FRAME;
     int   timer   = 0;    // ticks elapsed on the current frame (see advance())
+    bool  removed = false; // hit a `next: 1000` — objects despawn, actors reset
 
-    // Vitals (LF2 characters are all 500 HP unless a file overrides it).
-    int   hp = 0, mp = 0, maxHp = 0;
+    // Vitals (LF2 characters are all 500 HP/MP unless a file overrides them).
+    int   hp = 0, mp = 0, maxHp = 0, maxMp = 0;
 
     // ── Setup ────────────────────────────────────────────────────────────────
     void load(const dat::File* d) {
         data  = d;
         maxHp = hp = (int)d->header.get("hp", 500.f);
-        mp    = (int)d->header.get("mp", 500.f);
+        maxMp = mp = (int)d->header.get("mp", 500.f);
+        removed = false;
         setFrame(STANDING_FRAME, /*applyDv=*/false);
     }
 
@@ -125,12 +128,14 @@ struct Fighter {
         }
     }
 
-    // Follow the current frame's `next` link (999 → standing; dangling → standing).
+    // Follow the current frame's `next` link (999 → standing; 1000 → removed;
+    // dangling → standing).
     void gotoNext() {
         const dat::Frame* f = cur();
         if (!f) { setFrame(STANDING_FRAME); return; }
         int nx = f->next;
         if (nx == NEXT_STANDING) { setFrame(STANDING_FRAME); return; }
+        if (nx == NEXT_REMOVE)   { removed = true; return; }
         setFrame(nx);   // setFrame() already tolerates a missing id
     }
 
@@ -229,6 +234,14 @@ struct Fighter {
         float wx = facingRight ? (x + (bx - cx)) : (x + (cx - bx - bw));
         float wy = y + (by - cy);
         return { wx, wy, (float)bw, (float)bh };
+    }
+
+    // A single sprite-relative point (opoint/wpoint) in world space.
+    void pointWorld(int px, int py, float& wx, float& wy) const {
+        const dat::Frame* f = cur();
+        int cx = f ? f->centerx : 0, cy = f ? f->centery : 0;
+        wx = facingRight ? (x + (px - cx)) : (x + (cx - px));
+        wy = y + (py - cy);
     }
 
     // Convenience: emit all body / attack boxes of the current frame.

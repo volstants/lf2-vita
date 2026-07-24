@@ -13,7 +13,7 @@ set(VITA_APP_NAME "Little Fighter 2 Vita")
 # slot on the target Vita got into a state scePromoterUtil refuses (install
 # fails at the promote step, no bubble). A fresh id installs into a clean slot.
 set(VITA_TITLEID  "LF2V00002")
-set(VITA_VERSION  "01.07")   # v0.7.0 — inimigos data-driven (Fighter + IA)
+set(VITA_VERSION  "01.08")   # v0.8.0 — objetos/projéteis, MP, seleção de personagem
 
 # All headers are include-only (no .cpp besides main).
 # Add subdirectories so #include "engine/..." and "characters/..." resolve.
@@ -32,13 +32,20 @@ target_link_libraries(${PROJECT_NAME}
 )
 
 vita_create_self(${PROJECT_NAME}.self ${PROJECT_NAME})
+
+# Package EVERY converted sprite sheet (assets/*.png) and every game data file
+# (data/*.dat + data.txt). Globbed at configure time — re-run cmake after adding
+# new assets. The .bmp originals are NOT packaged.
+file(GLOB VPK_PNGS  RELATIVE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/assets/*.png)
+file(GLOB VPK_DATS  RELATIVE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/data/*.dat)
+set(VPK_FILES "")
+foreach(f ${VPK_PNGS} ${VPK_DATS} data/data.txt)
+  list(APPEND VPK_FILES FILE ${f} ${f})
+endforeach()
+
 vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   VERSION ${VITA_VERSION}
   NAME    ${VITA_APP_NAME}
-  # Custom icon + LiveArea, re-encoded as clean 8-bit RGBA (the earlier versions
-  # were rejected by scePromoterUtil → package "corrupted", no bubble). If this
-  # build fails to install again, the culprit is still here — disable these four
-  # FILE lines to fall back to VitaSDK's default sce_sys.
   # Custom icon + LiveArea. Vita's promoter requires these as 8-bit PALETTE
   # (indexed, colortype 3) PNGs — truecolor RGB/RGBA is rejected ("corrupted"
   # package, no bubble). Keep any future art in that format.
@@ -46,30 +53,5 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   FILE sce_sys/livearea/contents/bg.png       sce_sys/livearea/contents/bg.png
   FILE sce_sys/livearea/contents/startup.png  sce_sys/livearea/contents/startup.png
   FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
-  FILE assets/dennis_0.png assets/dennis_0.png
-  FILE assets/dennis_1.png assets/dennis_1.png
-  FILE assets/dennis_2.png assets/dennis_2.png
-  FILE assets/firen_0.png  assets/firen_0.png
-  FILE assets/firen_1.png  assets/firen_1.png
-  FILE assets/firen_2.png  assets/firen_2.png
-  FILE data/dennis.dat     data/dennis.dat
-  FILE data/firen.dat      data/firen.dat
-  # Lion Forest background layers (converted from bg/sys/lf originals) + shadow.
-  # These got dropped in a concurrent rewrite — without them the game renders a
-  # bare green floor and no shadows.
-  FILE assets/forests.png  assets/forests.png
-  FILE assets/forestm1.png assets/forestm1.png
-  FILE assets/forestm2.png assets/forestm2.png
-  FILE assets/forestm3.png assets/forestm3.png
-  FILE assets/forestm4.png assets/forestm4.png
-  FILE assets/forestt.png  assets/forestt.png
-  FILE assets/land1.png    assets/land1.png
-  FILE assets/land2.png    assets/land2.png
-  FILE assets/land4.png    assets/land4.png
-  FILE assets/s.png        assets/s.png
-  # Scenery: the old pre-baked forest/land PNGs are gone (assets wiped and
-  # re-sourced from the original LF2). Backgrounds will come data-driven from
-  # bg\sys\<stage>\bg.dat once the user copies the original bg/ folder in —
-  # including the per-stage shadow bitmap. Until then the game renders a plain
-  # ground (renderBackground tolerates missing textures).
+  ${VPK_FILES}
 )

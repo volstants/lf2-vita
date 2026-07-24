@@ -6,7 +6,38 @@ Projeto: engine LF2 nativo em C++ para PS Vita que interpreta os `.dat` originai
 Pasta oficial: `C:\Users\rodrigo.chiesa\Documents\LittleFighter2Vita` (OneDrive abandonado).
 Build: WSL Ubuntu, VitaSDK (`cd build && cmake .. && make`). Commits feitos pelo usuário
 no Windows/WSL — a sandbox do Claude NÃO roda git (locks impossíveis de apagar).
-Testes host: `make -f Makefile.host test` (test_dat, test_fighter, test_player, test_enemy).
+Testes host: `make -f Makefile.host test` (test_dat, test_fighter, test_player, test_enemy, test_object).
+
+Referências de comportamento do LF2 (NÃO estão no repo; consultar quando houver
+dúvida de mecânica em vez de inferir só dos dados):
+- **OpenLF2** — github.com/xsoameix/openlf2 — decompilação do binário ORIGINAL.
+  Ground truth para: contador de queda (fall/thresholds), banda de z da colisão
+  (zwidth/default), spawn de opoint (z herdado), códigos de next 1000+, arest/vrest.
+- **F.LF** — github.com/volstants/F.LittleFighter — reimplementação em JS (referência
+  de comportamento de alto nível; foi a base dos valores hardcoded iniciais).
+Como consultar: clone em caminho NATIVO da sandbox (git não gerencia locks no
+mount): `cd ~ && git clone --depth 1 https://github.com/xsoameix/openlf2`. Ler
+com grep/sed via bash (o tool Read não alcança fora das pastas montadas). É
+decompilação PARCIAL: detecção de colisão está pronta (src/class_global.c ~150-240);
+a aplicação de fall/injury ainda referencia endereços crus não decompilados.
+
+Achados do OpenLF2 já aplicados (2026-07-24):
+- Banda de z: `abs(dz) < itr->zwidth`, default **15** (não 12). itr especifica zwidth
+  largo em golpes de rodopio. CORRIGIDO em main.cpp (HitInfo.zwidth).
+- Anti-juggle: itr com `fall <= 40` NÃO acerta vítima já em falling; `fall > 40` acerta.
+  CORRIGIDO no guard de colisão do player→inimigo.
+- Matemática de âncora/caixa CONFIRMADA idêntica: `left = x - centerx + box.x` (right) /
+  `x + centerx - w - box.x` (left), `top = y - centery + box.y`. Meu fix da âncora estava certo.
+Contador de fall CORRIGIDO (docs da comunidade, LF2 Fandom "Falling"): modelo era
+INVERTIDO. Real = Falling Points: FP começa 0, hit SOMA o `fall` do itr, decai 1/frame.
+FP>40 = Dance of Pain (atordoado em pé); FP>60 = knockdown, FP=0. Valores de fall
+sempre 1/10/20/25/40/60/70. Consequência: fall-60 sozinho NÃO derruba (60 não é >60);
+fall-70 (launcher) derruba de primeira; flurry acumula. Implementado em player.hpp (fp).
+Refinamento pendente: DoP usa frame injured curto (220); poderia usar o injured2/DoP
+(226, ~28 frames imóvel) pro stun mais longo.
+
+Aberto: transformação do Louis (LouisEX, next 1000+) — resolver por docs da comunidade
+quando for relevante (OpenLF2 não decompilou; não precisa de Ghidra por ora).
 
 Arquitetura: `dat.hpp` (parser: decrypt+parse dos .dat, índice data.txt) →
 `fighter.hpp` (interpretador do grafo de frames: next/999, dv 550=zero 0=keep,
@@ -44,35 +75,38 @@ Armadilhas descobertas (não redescobrir):
 - SESSÕES CONCORRENTES do Claude no mesmo repo já corromperam diagnóstico duas vezes.
   Uma sessão por vez, ou definir dono dos assets.
 
-## Bugs conhecidos / pendências
+## Estado dos controles (validado em device, exceto onde marcado)
 
-| # | Bug | Estado | Como verificar |
-|---|-----|--------|----------------|
-| 1 | "Linha acima" no chute (sprite deslocado) | NÃO REPRODUZIDO no disco atual; suspeita de artefato da folha stub antiga | Na Vita: ↓+ataque (many_foot 265) e observar se aparece tira deslocada. Se sim: bug vivo, instrumentar drawOrigin |
-| 2 | dennis_2.png era o DAVIS renomeado (sessão concorrente) | **RESOLVIDO** — usuário apagou assets/ e recopiou os BMPs originais do LF2; 6 folhas (dennis_0/1/2, firen_0/1/2) reconvertidas do zero e validadas: ocupação célula-a-célula OK, inspeção visual confirma Dennis (cabelo grisalho, casaco verde) com pics 178-187 (kicks, chase_ball) preenchidos | Testar na Vita: chute (many_foot 265) e chase_ball (295) devem desenhar o Dennis certo, sem sumir |
-| 3 | Jitter horizontal em frames de centerx variável | CORRIGIDO (âncora única) — aguarda teste em device | Na Vita: socos/chutes repetidos — corpo não deve tremer. Host: teste "cell slides by centerx delta" |
-| 4 | Facing-left: alinhamento sprite/hitbox após mudança de âncora | ALGEBRICAMENTE correto, não testado em device | Na Vita: virar à esquerda, socar inimigo — golpe conecta na distância visual certa |
-| 5 | Especiais de projétil (bola 235, chase 295) animam mas não cospem objeto | ESPERADO — falta sistema opoint | Só se resolve com o próximo passo |
-| 6 | Sombra/câmera/spawn após âncora | Ajustados (-28 sombra, clamp SW/2) — validar visualmente | Na Vita: sombra sob os pés, bordas do mapa ok |
-| 7 | BTN_DEFEND=0 (Triângulo) | Confirmado pelo usuário como Triângulo | — |
+- X = ataque (combo soco 60↔65 por buffering, cada soco = novo swing)
+- Círculo = pulo · corrida = duplo-toque · dash = corrida+pulo
+- Triângulo = defesa (recuo 111 ao bloquear — OK em device)
+- Quadrado = especial (nível, 3 modos: dir+Sq / Sq segurado+dir / Sq arma 0,5s):
+  neutro? não — Fa=frente, Ua=↑, Da=↓, Fj=Quadrado+Pulo. Funciona em device
+  exceto Quadrado+Pulo (corrigido p/ nível; AGUARDA RETESTE).
 
-## Testes de verificação (na Vita, nesta ordem)
+## Bugs / pendências (após reteste de 2026-07-24)
 
-1. Soco repetido (combo 60↔65): sem tremida horizontal (#3), sprites corretos.
-2. Virado à esquerda: soco conecta e sprite alinha (#4).
-3. ↓+ataque (chute many_foot): sprite ok? "linha acima" ainda existe? (#1)
-4. ↑+ataque e F+pulo: personagem some nos frames finais (#2 — esperado até a arte chegar).
-5. Defesa (Triângulo): guarda + recuo (111) ao bloquear.
-6. Sombras, câmera, bordas (#6).
+| # | Item | Estado |
+|---|------|--------|
+| 1 | Chão com buracos pretos | CORRIGIDO (land1/land4 chave preta) — aguarda reteste |
+| 2 | Quadrado+Pulo não disparava | CORRIGIDO (spc como nível + 3 modos) — aguarda reteste |
+| 3 | Multi-hit do many_foot (1 hit só + inimigo expelido) | CORRIGIDO (re-hit por vrest/arest, knockback = dvx do itr: flurry 2px segura, finisher 12 lança) — aguarda reteste |
+| 4 | "Linha acima" no chute | Usuário reportou "Sim" no reteste anterior — RECONFIRMAR no build atual; se persistir, instrumentar drawOrigin |
+| 5 | ↑+ataque "some no fim" | Folhas completas + física normal — provável build velho; RECONFIRMAR |
+| 6 | Projéteis (bola 235/chase 295) só animam | ESPERADO — falta sistema opoint (próximo passo grande) |
+| 7 | Sombras | OK em device (elipse 37×9 do bg.dat) |
+| 8 | Cenário Lion Forest | Restaurado + FILE entries no VPK — aguarda reteste |
 
 ## Próximos passos (ordem)
 
-1. Usuário: rebuild + bateria de testes acima; commit
-   ("Ancora unica no Fighter (objectX): fim do jitter em frames com centerx variavel").
-2. Usuário: fornecer dennis_2.bmp original → completar pics 178-187 (fecha #2).
-3. **Sistema de objetos/projéteis** (opoint → oid → data.txt index → spawn):
-   bola de fogo/chase nascem de verdade; base p/ armas type 1/2. dat::Index já resolve oid.
-4. Sistema de MP (frame.mp: custo dos especiais; regen).
-5. Áudio sceAudio (sound: dos frames → data/*.wav).
-6. Roster/seleção de personagem (26 no data.txt) e stages (stage.dat).
+1. Usuário: rebuild + reteste dos itens 1-5 acima; commit do lote
+   ("Especiais no Quadrado, re-hit vrest/arest, knockback dvx, chao/land fix").
+2. **Sistema de objetos/projéteis** (opoint → oid → data.txt index → spawn/update/despawn):
+   bola de fogo/chase nascem de verdade; base p/ armas type 1/2. dat::Index já
+   resolve oid; empacotar dennis_ball.dat/dennis_chase.dat + folhas no VPK.
+3. Sistema de MP (frame.mp: custo dos especiais; regen; barra no HUD já existe).
+4. Áudio sceAudio (sound: dos frames → data/*.wav).
+5. Parser de bg.dat → renderBackground data-driven (bg/ completo já no disco;
+   destrava as 9 fases) + stage.dat (waves/spawns/bosses).
+6. Roster/seleção de personagem (26 no data.txt; BMPs de todos já em assets/).
 7. Backend GXM (por último; ver CHECKLIST.md).

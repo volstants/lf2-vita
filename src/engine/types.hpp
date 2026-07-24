@@ -19,7 +19,7 @@ constexpr int   Z_MIN      = 365;
 constexpr int   Z_MAX      = 505;
 constexpr float WALK_SPEED  = 5.0f;
 constexpr float WALK_SPEEDZ = 2.5f;
-constexpr float GRAVITY     = 0.7f;
+constexpr float GRAVITY     = 1.7f;   // LF2's per-tick gravity (community-documented)
 constexpr float JUMP_VY     = -16.3f;   // from davis.js
 constexpr int   TICK_MS     = 33;   // 30 Hz logic — LF2's native tick. The frame
                                     // interpreter's wait/dv values assume it; at
@@ -34,6 +34,7 @@ constexpr int     BTN_ATTACK  = 2;  // Cross
 constexpr int     BTN_JUMP    = 1;  // Circle
 constexpr int     BTN_DEFEND  = 0;  // Triangle (confirmed on device)
 constexpr int     BTN_SPECIAL = 3;  // Square — arms a special; direction fires it
+constexpr int     BTN_START   = 11; // Start — TEST MODE: toggles enemy AI on/off
 constexpr int     DEADZONE   = 8000;   // compared against SDL_JoystickGetAxis (Sint16)
 
 // ── Hit detection ─────────────────────────────────────────────────────────────

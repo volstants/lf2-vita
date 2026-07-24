@@ -184,6 +184,33 @@ int main() {
     p.tick(false,false,false,false, false, true, false, false);  // tap Jump
     CHECK(p.f.frameId == 280, "Square then Jump fires hit_Fj (280)");
 
+    // The c_foot loop (284→287→284) is INTENTIONALLY infinite in the .dat; the
+    // engine must break it by draining MP (frames carry mp:-17) and exit via
+    // hit_d (288) when MP runs dry — otherwise the whirlwind slides forever.
+    {
+        int guard2 = 0;
+        while (p.state() == lf2::ST_ATTACK && guard2++ < 3000)
+            p.tick(false,false,false,false, false,false, false,false);
+        CHECK(guard2 < 3000,           "c_foot loop terminates (MP drain breaks it)");
+        CHECK(p.f.mp < p.f.maxMp,      "looping special drained MP");
+    }
+    // Early exit: pressing Defend during the loop bails out via hit_d (288).
+    p.f.setFrame(lf2::fid::STANDING, false); p.seqStage = 0; p.h = 0.f;
+    p.prevSpc = false; p.f.mp = p.f.maxMp;
+    p.tick(false,false,false,false, false, true, false, true);   // Square+Jump → 280
+    for (int i = 0; i < 12; ++i)                                  // into the loop
+        p.tick(false,false,false,false, false,false, false,false);
+    p.tick(false,false,false,false, false,false, true, false);   // press Defend
+    CHECK(p.f.frameId >= 288 && p.f.frameId <= 290,
+          "Defend mid-loop exits c_foot via hit_d (288)");
+
+    // Neutral Square (tap alone, no direction, then release) = forward special.
+    p.f.setFrame(lf2::fid::STANDING, false); p.right = true; p.h = 0.f;
+    p.seqStage = 0; p.prevSpc = false;
+    p.tick(false,false,false,false, false,false, false, true);   // press+hold Square (arms)
+    p.tick(false,false,false,false, false,false, false, false);  // release → neutral special
+    CHECK(p.f.frameId == 235, "neutral Square (tap) fires the forward special (235)");
+
     // Attack alone still punches (Square is the only special trigger).
     p.f.setFrame(lf2::fid::STANDING, false); p.seqStage = 0; p.comboNext = false;
     p.h = 0.f; p.vy = 0.f; p.prevSpc = false;
@@ -200,7 +227,7 @@ int main() {
     // ── Combat reactions ─────────────────────────────────────────────────────
     auto reset = [&]() {
         p.f.hp = p.f.maxHp; p.h = 0.f; p.vy = 0.f; p.knockedDown = false;
-        p.fallValue = lf2::Player::FALL_MAX;
+        p.fp = 0;
         p.right = true; p.f.setFrame(lf2::fid::STANDING, false);
     };
 
@@ -215,17 +242,22 @@ int main() {
         p.tick(false,false,false,false,false,false);
     CHECK(p.state() == lf2::ST_STANDING,  "stagger recovers to standing");
 
-    // A rapid sequence of weak hits accumulates into a knockdown.
+    // A rapid sequence of weak hits accumulates FP (25,50,75) past 60 → knockdown.
     reset();
-    p.hit(20, -10.f, 25); CHECK(!p.knockedDown, "combo hit 1: still standing");
-    p.hit(20, -10.f, 25); CHECK(!p.knockedDown, "combo hit 2: still standing");
-    p.hit(20, -10.f, 25); CHECK(p.knockedDown,  "combo hit 3: fall budget spent → knockdown");
+    p.hit(20, -10.f, 25); CHECK(!p.knockedDown, "combo hit 1 (FP 25): still standing");
+    p.hit(20, -10.f, 25); CHECK(!p.knockedDown, "combo hit 2 (FP 50): still standing");
+    p.hit(20, -10.f, 25); CHECK(p.knockedDown,  "combo hit 3 (FP 75 > 60): knockdown");
 
-    // Single heavy blow (fall >= 60) knocks down immediately.
+    // A single fall-60 hit is FP 60 — NOT over 60 — so it staggers, doesn't fall.
     reset();
     p.hit(40, -10.f, /*fall=*/60);
-    CHECK(p.knockedDown,                  "heavy blow (fall>=60) knocks down at once");
-    CHECK(p.state() == lf2::ST_FALLING,   "heavy hit → falling (state 12)");
+    CHECK(!p.knockedDown && p.state() == lf2::ST_INJURED,
+          "single fall-60 stays up (FP 60 is not > 60)");
+    // A single fall-70 launcher (FP 70 > 60) knocks down at once.
+    reset();
+    p.hit(40, -10.f, /*fall=*/70);
+    CHECK(p.knockedDown,                  "single fall-70 launcher knocks down at once");
+    CHECK(p.state() == lf2::ST_FALLING,   "launcher → falling (state 12)");
     guard = 0;
     while (p.state() != lf2::ST_LYING && guard++ < 300)
         p.tick(false,false,false,false,false,false);

@@ -7,6 +7,9 @@ bg/
 *.dat
 !sce_sys/**/*.dat
 
+# ── Reference clones (OpenLF2 etc.) — consulta, não faz parte do build ───────
+reference/
+
 # ── Build artifacts ──────────────────────────────────────────────────────────
 build/
 build-out/

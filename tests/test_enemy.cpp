@@ -39,7 +39,7 @@ int main() {
 
     // Enemy takes a heavy hit → loses HP and is knocked down.
     int hp0 = e.a.hp();
-    e.a.hit(30, -10.f, /*fall=*/60);
+    e.a.hit(30, -10.f, /*fall=*/70);   // >60 → knockdown (fall-60 alone only staggers)
     CHECK(e.a.hp() < hp0, "enemy loses HP when hit");
     CHECK(e.a.state() == lf2::ST_FALLING || e.a.knockedDown,
           "heavy hit knocks the enemy down");

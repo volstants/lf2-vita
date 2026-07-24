@@ -2,162 +2,194 @@
 #include <SDL2/SDL_image.h>
 #include <psp2/kernel/processmgr.h>
 #include <cmath>
+#include <cstring>
+#include <string>
+#include <vector>
 
 #include "engine/types.hpp"
 #include "engine/render.hpp"
 #include "engine/dat.hpp"
 #include "engine/fighter.hpp"
-#include "characters/player.hpp"   // lf2::Player — frame-driven actor (player)
-#include "characters/enemy.hpp"    // Enemy = lf2::Player + pursuit AI
+#include "engine/object.hpp"
+#include "characters/player.hpp"
+#include "characters/enemy.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Character data — loaded once from the original .dat, bundled in the VPK.
-//  Player and enemies are both data-driven now; add more characters by loading
-//  more .dat files here.
+//  Roster & asset banks — everything is loaded from the original .dat files.
+//  Character sheets/faces/ball sheets were batch-converted from the original
+//  BMPs (tools/bmp2png.py); ALL of them use black as the transparent key.
 // ─────────────────────────────────────────────────────────────────────────────
-static dat::File g_dennis;
-static dat::File g_firen;
+static const char* ROSTER[] = { "dennis", "davis", "woody", "firen",
+                                "freeze", "rudolf", "louis", "henry" };
+constexpr int ROSTER_N = 8;
+
+// "sprite\sys\dennis_0.bmp" → "app0:/assets/dennis_0.png"
+static std::string sheetAsset(const std::string& datPath) {
+    size_t slash = datPath.find_last_of("\\/");
+    std::string base = (slash == std::string::npos) ? datPath : datPath.substr(slash + 1);
+    size_t dot = base.find_last_of('.');
+    if (dot != std::string::npos) base = base.substr(0, dot);
+    return "app0:/assets/" + base + ".png";
+}
+
+struct CharAssets {
+    dat::File data;
+    std::vector<SDL_Texture*> sheets;   // one per header file() entry, in order
+    SDL_Texture* face = nullptr;
+    bool texLoaded = false;
+
+    void loadTextures(SDL_Renderer* r, const char* name) {
+        if (texLoaded) return;
+        sheets.clear();
+        for (const auto& s : data.header.files)
+            sheets.push_back(loadTex(r, sheetAsset(s.path).c_str(), true, 0, 0, 0));
+        face = loadTex(r, (std::string("app0:/assets/") + name + "_f.png").c_str(), false);
+        texLoaded = true;
+    }
+};
+static CharAssets g_chars[ROSTER_N];
+static dat::Index g_index;              // data.txt: oid → file
+
+// Projectile bank, cached by oid, resolved through data.txt at first spawn.
+struct ObjAssets {
+    int oid = -1;
+    dat::File data;
+    std::vector<SDL_Texture*> sheets;
+};
+static std::vector<ObjAssets> g_objBank;
+
+static ObjAssets* objAssets(SDL_Renderer* r, int oid) {
+    for (auto& o : g_objBank) if (o.oid == oid) return &o;
+    const dat::ObjectEntry* e = g_index.object(oid);
+    if (!e) return nullptr;
+    ObjAssets oa; oa.oid = oid;
+    std::string path = e->file;                       // "data\dennis_ball.dat"
+    for (auto& c : path) if (c == '\\') c = '/';
+    oa.data = dat::load(("app0:/" + path).c_str());
+    if (oa.data.frames.empty()) return nullptr;
+    for (const auto& s : oa.data.header.files)
+        oa.sheets.push_back(loadTex(r, sheetAsset(s.path).c_str(), true, 0, 0, 0));
+    g_objBank.push_back(std::move(oa));
+    return &g_objBank.back();
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Collision helpers — work on any lf2::Player (player OR enemy actor)
+//  Generic fighter rendering — geometry comes from the .dat header (cell w/h,
+//  cells-per-row) with the +1 grid-line stride the original sheets use.
+// ─────────────────────────────────────────────────────────────────────────────
+static void drawFighter(SDL_Renderer* r, const lf2::Fighter& f,
+                        const std::vector<SDL_Texture*>& sheets, int camX,
+                        Uint8 cr = 255, Uint8 cg = 255, Uint8 cb = 255)
+{
+    int ord, loc;
+    if (!f.sheetLocal(ord, loc) || ord < 0 || ord >= (int)sheets.size() || !sheets[ord])
+        return;
+    const dat::SpriteSheet& s = f.data->header.files[ord];
+    int row = s.row > 0 ? s.row : 1;
+    SDL_Rect src = { (loc % row) * (s.w + 1), (loc / row) * (s.h + 1), s.w, s.h };
+    float dx, dy;
+    f.drawOrigin(dx, dy);
+    SDL_Rect dst = { (int)dx - camX, (int)dy, s.w, s.h };
+    SDL_SetTextureColorMod(sheets[ord], cr, cg, cb);
+    SDL_RenderCopyEx(r, sheets[ord], &src, &dst, 0, nullptr,
+                     f.facingRight ? SDL_FLIP_NONE : SDL_FLIP_HORIZONTAL);
+    SDL_SetTextureColorMod(sheets[ord], 255, 255, 255);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Collision helpers
 // ─────────────────────────────────────────────────────────────────────────────
 static inline Box toBox(const lf2::WBox& w) {
     return { (int)w.x, (int)w.y, (int)w.w, (int)w.h };
 }
 
-// First attacking itr (kind 0) of the actor's current frame, in world space.
-// Only present during attack frames, so it doubles as "is this actor striking?".
 struct HitInfo {
     Box box;
-    int injury = 20;   // damage
-    int fall   = -1;   // knockdown weight
-    int dvx    = 0;    // victim knockback (facing-signed by the caller)
-    int rest   = 8;    // re-hit delay: vrest (per victim) or arest, default 8 ticks
+    int injury = 20, fall = -1, dvx = 0, rest = 8, zwidth = 15;
 };
-static bool actorAttack(const lf2::Player& p, HitInfo& out) {
+static bool fighterAttack(const lf2::Fighter& f, HitInfo& out) {
     bool found = false;
-    p.f.forEachItr([&](const lf2::WBox& wb, const dat::Itr& it) {
+    f.forEachItr([&](const lf2::WBox& wb, const dat::Itr& it) {
         if (it.kind == 0 && !found) {
             out.box    = toBox(wb);
             out.injury = it.injury > 0 ? it.injury : 20;
             out.fall   = it.fall;
             out.dvx    = it.dvx;
             out.rest   = it.vrest > 0 ? it.vrest : (it.arest > 0 ? it.arest : 8);
+            // OpenLF2 (decompiled): z-band = itr->zwidth, default 15 when 0/unset;
+            // hit requires abs(dz) < zwidth. Whirlwind moves set a wide zwidth.
+            out.zwidth = it.zwidth > 0 ? it.zwidth : 15;
             found = true;
         }
     });
     return found;
 }
-
-// First body box of the actor's current frame, in world space.
-static bool actorBody(const lf2::Player& p, Box& out) {
+static bool fighterBody(const lf2::Fighter& f, Box& out) {
     bool found = false;
-    p.f.forEachBdy([&](const lf2::WBox& wb, const dat::Bdy&) {
+    f.forEachBdy([&](const lf2::WBox& wb, const dat::Bdy&) {
         if (!found) { out = toBox(wb); found = true; }
     });
     return found;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Input helpers (PS Vita joystick → bool directions / buttons)
+//  Input
 // ─────────────────────────────────────────────────────────────────────────────
-struct InputState { bool L, R, U, D, atk, jmp, def, spc, any; };
+struct InputState { bool L, R, U, D, atk, jmp, def, spc, start, any; };
 
 static InputState readInput(SDL_Joystick* joy) {
     InputState in{};
     if (!joy) return in;
-
     Sint16 ax = SDL_JoystickGetAxis(joy, 0);
     Sint16 ay = SDL_JoystickGetAxis(joy, 1);
     if (ax < -DEADZONE) in.L = true;
     if (ax >  DEADZONE) in.R = true;
     if (ay < -DEADZONE) in.U = true;
     if (ay >  DEADZONE) in.D = true;
-
     if (SDL_JoystickGetButton(joy, BTN_LEFT))  in.L = true;
     if (SDL_JoystickGetButton(joy, BTN_RIGHT)) in.R = true;
     if (SDL_JoystickGetButton(joy, BTN_UP))    in.U = true;
     if (SDL_JoystickGetButton(joy, BTN_DOWN))  in.D = true;
-
     in.atk = SDL_JoystickGetButton(joy, BTN_ATTACK);
     in.jmp = SDL_JoystickGetButton(joy, BTN_JUMP);
     in.def = SDL_JoystickGetButton(joy, BTN_DEFEND);
-    in.spc = SDL_JoystickGetButton(joy, BTN_SPECIAL);
+    in.spc   = SDL_JoystickGetButton(joy, BTN_SPECIAL);
+    in.start = SDL_JoystickGetButton(joy, BTN_START);
     in.any = in.atk || in.jmp || in.def || in.spc || in.L || in.R || in.U || in.D;
     return in;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Textures
+//  Background (Lion Forest)
 // ─────────────────────────────────────────────────────────────────────────────
 struct Textures {
-    SDL_Texture* forests  = nullptr;
-    SDL_Texture* forestm1 = nullptr;
-    SDL_Texture* forestm2 = nullptr;
-    SDL_Texture* forestm3 = nullptr;
-    SDL_Texture* forestm4 = nullptr;
-    SDL_Texture* foresett = nullptr;
-    SDL_Texture* land1    = nullptr;
-    SDL_Texture* land2    = nullptr;
-    SDL_Texture* land4    = nullptr;
-    // Character sheets, indexed by the .dat's declared file() order:
-    //   0 → pics 0-69, 1 → pics 70-139, 2 → pics 140-209
-    SDL_Texture* dennis[3] = { nullptr, nullptr, nullptr };  // magenta key
-    SDL_Texture* firen[3]  = { nullptr, nullptr, nullptr };  // black key
-    SDL_Texture* shadow   = nullptr;
-
+    SDL_Texture *forests = nullptr, *forestm1 = nullptr, *forestm2 = nullptr,
+                *forestm3 = nullptr, *forestm4 = nullptr, *foresett = nullptr,
+                *land1 = nullptr, *land2 = nullptr, *land4 = nullptr,
+                *shadow = nullptr;
     void load(SDL_Renderer* r) {
         forests  = loadTex(r, "app0:/assets/forests.png",  false);
-        // Forest layers ship with BLACK transparent backgrounds (not the magenta
-        // the Dennis sheets use), so they need a black color key.
         forestm1 = loadTex(r, "app0:/assets/forestm1.png", true, 0, 0, 0);
         forestm2 = loadTex(r, "app0:/assets/forestm2.png", true, 0, 0, 0);
         forestm3 = loadTex(r, "app0:/assets/forestm3.png", true, 0, 0, 0);
         forestm4 = loadTex(r, "app0:/assets/forestm4.png", true, 0, 0, 0);
         foresett = loadTex(r, "app0:/assets/forestt.png",  true, 0, 0, 0);
-        // land1/land4 ship with black transparent backgrounds (land2 is green-
-        // backed): drawing them opaque punches black holes in the ground.
         land1    = loadTex(r, "app0:/assets/land1.png",    true, 0, 0, 0);
         land2    = loadTex(r, "app0:/assets/land2.png",    false);
         land4    = loadTex(r, "app0:/assets/land4.png",    true, 0, 0, 0);
-        // All sheets now come straight from the ORIGINAL LF2 BMPs, whose
-        // transparent background is pure BLACK (the old magenta sheets were
-        // pre-processed exports and are gone).
-        dennis[0] = loadTex(r, "app0:/assets/dennis_0.png", true, 0, 0, 0);
-        dennis[1] = loadTex(r, "app0:/assets/dennis_1.png", true, 0, 0, 0);
-        dennis[2] = loadTex(r, "app0:/assets/dennis_2.png", true, 0, 0, 0);
-        firen[0]  = loadTex(r, "app0:/assets/firen_0.png",  true, 0, 0, 0);
-        firen[1]  = loadTex(r, "app0:/assets/firen_1.png",  true, 0, 0, 0);
-        firen[2]  = loadTex(r, "app0:/assets/firen_2.png",  true, 0, 0, 0);
-        shadow    = loadTex(r, "app0:/assets/s.png", true, 0, 0, 0); // ellipse on black
+        shadow   = loadTex(r, "app0:/assets/s.png",        true, 0, 0, 0);
     }
 };
 
-// Draw one frame-driven actor from its own sheets, at its .dat sprite origin.
-static void drawActor(SDL_Renderer* r, const lf2::Player& a, SDL_Texture* const sheets[3],
-                      int camX, Uint8 cr = 255, Uint8 cg = 255, Uint8 cb = 255)
-{
-    int ord, loc;
-    if (!a.f.sheetLocal(ord, loc) || ord < 0 || ord >= 3 || !sheets[ord]) return;
-    float dx, dy;
-    a.f.drawOrigin(dx, dy);
-    drawSprite(r, sheets[ord], loc, (int)dx - camX, (int)dy, !a.right, cr, cg, cb);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Render: background layers
-// ─────────────────────────────────────────────────────────────────────────────
 static void renderBackground(SDL_Renderer* r, const Textures& tx, int camX) {
     SDL_SetRenderDrawColor(r, 111, 163, 218, 255);
     SDL_RenderClear(r);
-
     drawTiled(r, tx.forests,   128, 800,  70, camX);
     drawOnce (r, tx.forestm1,    0, 147, 800, 104, camX);
     drawOnce (r, tx.forestm2,  800, 147, 300, 104, camX);
     drawOnce (r, tx.forestm3,    0, 170, 284,  84, camX);
     drawOnce (r, tx.forestm4, 1216, 155, 184,  87, camX);
     drawTiled(r, tx.foresett,  199, 253, 162, camX);
-
     fillRect(r, 0, 356, SCREEN_W, 172, 16, 77, 16);
     drawTiled(r, tx.land1, 356, 175,  74, camX);
     drawTiled(r, tx.land2, 385, 225,  89, camX);
@@ -165,88 +197,93 @@ static void renderBackground(SDL_Renderer* r, const Textures& tx, int camX) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Render: actors sorted by Z (painter's algorithm)
+//  Game state
 // ─────────────────────────────────────────────────────────────────────────────
-static void renderCharacters(SDL_Renderer* r, const Textures& tx,
-                             const lf2::Player& player, Enemy enemies[], int camX)
-{
-    if (tx.shadow) {
-        // player.x is the anchor (sprite middle). Shadow at its native size from
-        // the bg.dat spec (shadowsize: 37 9), centered under the anchor.
-        SDL_Rect ps = { (int)player.x - camX - 18, (int)player.z - 4, 37, 9 };
-        SDL_RenderCopy(r, tx.shadow, nullptr, &ps);
-        for (int i = 0; i < NUM_ENEMIES; i++) {
-            SDL_Rect es = { (int)enemies[i].a.x - camX - 18, (int)enemies[i].a.z - 4, 37, 9 };
-            SDL_RenderCopy(r, tx.shadow, nullptr, &es);
-        }
-    }
+static lf2::ObjectPool<24> g_objects;
 
-    struct Drawable { float z; int type; int idx; };
-    Drawable dlist[NUM_ENEMIES + 1];
-    dlist[0] = { player.z, 0, 0 };
-    for (int i = 0; i < NUM_ENEMIES; i++) dlist[i + 1] = { enemies[i].a.z, 1, i };
+struct EnemySlot { Enemy e; int rosterIdx = 3; int prevFrame = -1; };
 
-    for (int i = 1; i < NUM_ENEMIES + 1; i++) {
-        Drawable key = dlist[i]; int j = i - 1;
-        while (j >= 0 && dlist[j].z > key.z) { dlist[j + 1] = dlist[j]; j--; }
-        dlist[j + 1] = key;
-    }
-
-    for (int i = 0; i < NUM_ENEMIES + 1; i++) {
-        if (dlist[i].type == 0) {
-            drawActor(r, player, tx.dennis, camX);
-        } else {
-            int k = dlist[i].idx;
-            bool flash = enemies[k].hitFlash > 0;
-            drawActor(r, enemies[k].a, tx.firen, camX,
-                      255, flash ? 80 : 255, flash ? 80 : 255);
-        }
+// Spawn every kind-1 opoint of the frame the fighter JUST entered.
+static void spawnOpoints(SDL_Renderer* r, const lf2::Fighter& f, int team) {
+    const dat::Frame* fr = f.cur();
+    if (!fr || fr->opoints.empty()) return;
+    for (const dat::Opoint& op : fr->opoints) {
+        if (op.kind != 1) continue;
+        ObjAssets* oa = objAssets(r, op.oid);
+        if (!oa) continue;
+        lf2::Object* o = g_objects.alloc();
+        if (!o) continue;
+        float wx, wy;
+        f.pointWorld(op.x, op.y, wx, wy);
+        bool faceRight = (op.facing == 1) ? !f.facingRight : f.facingRight;
+        float vx0 = faceRight ? (float)op.dvx : -(float)op.dvx;   // launch in facing dir
+        o->spawn(&oa->data, (int)(oa - &g_objBank[0]), wx, wy, f.z,
+                 faceRight, op.action, team, vx0, (float)op.dvy);
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Render: HUD (HP bars + portraits)
+//  HUD
 // ─────────────────────────────────────────────────────────────────────────────
-static void renderHUD(SDL_Renderer* r, const Textures& tx,
-                      const lf2::Player& player, Enemy enemies[])
+static void renderHUD(SDL_Renderer* r, const lf2::Player& player, int playerIdx,
+                      EnemySlot slots[])
 {
     constexpr int HUD_H   = 72;
     constexpr int SLOTS   = NUM_ENEMIES + 1;
     constexpr int SW_SLOT = SCREEN_W / SLOTS;
-    constexpr int PORT_W  = 40, PORT_H = 56;
-    constexpr int BAR_X   = PORT_W + 6;
+    constexpr int PORT    = 56;
+    constexpr int BAR_X   = PORT + 8;
 
     fillRect(r, 0, 0, SCREEN_W, HUD_H, 28, 56, 130);
     fillRect(r, 0, HUD_H, SCREEN_W, 2, 10, 20, 70);
     for (int i = 1; i < SLOTS; i++)
         fillRect(r, i * SW_SLOT - 1, 2, 2, HUD_H - 4, 10, 20, 80);
 
-    fillRect(r, 2, 2, PORT_W, PORT_H, 18, 36, 90);
-    drawSpriteAt(r, tx.dennis[0], 0, 2, 2, PORT_W, PORT_H, false);
-    drawHpBar(r, BAR_X, 10, player.hp(), player.maxHp(), 210, 40,  40);
-    drawHpBar(r, BAR_X, 28,           0, player.maxHp(),  40, 110, 210);
+    // Player: face portrait + HP (red) + MP (blue, now live).
+    fillRect(r, 2, 2, PORT, PORT, 18, 36, 90);
+    if (g_chars[playerIdx].face) {
+        SDL_Rect d = { 2, 2, PORT, PORT };
+        SDL_RenderCopy(r, g_chars[playerIdx].face, nullptr, &d);
+    }
+    drawHpBar(r, BAR_X, 12, player.hp(),  player.maxHp(), 210, 40,  40);
+    drawHpBar(r, BAR_X, 30, player.f.mp,  player.f.maxMp,  40, 110, 210);
 
     for (int i = 0; i < NUM_ENEMIES; i++) {
         int sx = (i + 1) * SW_SLOT;
-        fillRect(r, sx + 2, 2, PORT_W, PORT_H, 18, 36, 90);
-        drawSpriteAt(r, tx.firen[0], 0, sx + 2, 2, PORT_W, PORT_H, true);
-        drawHpBar(r, sx + BAR_X, 10, enemies[i].a.hp(), enemies[i].a.maxHp(), 210, 40,  40);
-        drawHpBar(r, sx + BAR_X, 28,                 0, enemies[i].a.maxHp(),  40, 110, 210);
+        fillRect(r, sx + 2, 2, PORT, PORT, 18, 36, 90);
+        SDL_Texture* face = g_chars[slots[i].rosterIdx].face;
+        if (face) { SDL_Rect d = { sx + 2, 2, PORT, PORT };
+                    SDL_RenderCopyEx(r, face, nullptr, &d, 0, nullptr, SDL_FLIP_HORIZONTAL); }
+        drawHpBar(r, sx + BAR_X, 12, slots[i].e.a.hp(), slots[i].e.a.maxHp(), 210, 40, 40);
+        drawHpBar(r, sx + BAR_X, 30, slots[i].e.a.f.mp, slots[i].e.a.f.maxMp,  40, 110, 210);
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Render: menu / game-over
+//  Menu: character select
 // ─────────────────────────────────────────────────────────────────────────────
-static void renderMenu(SDL_Renderer* r) {
+static void renderMenu(SDL_Renderer* r, int cursor) {
     fillRect(r, 0, 0, SCREEN_W, SCREEN_H, 10, 10, 40);
-    fillRect(r, SCREEN_W/2 - 240, 180, 480,  70, 220, 170,   0);
-    fillRect(r, SCREEN_W/2 - 236, 184, 472,  62,  40,  20,   0);
-    fillRect(r, SCREEN_W/2 - 120, 193,  70,  44, 220, 170,   0);
-    fillRect(r, SCREEN_W/2 -  30, 193,  70,  44, 220, 170,   0);
-    fillRect(r, SCREEN_W/2 +  60, 193,  70,  44, 220, 170,   0);
+    // Title strip
+    fillRect(r, SCREEN_W/2 - 260, 40, 520, 8, 220, 170, 0);
+    // 8 portrait cards, 4×2 grid.
+    constexpr int CARD = 132, GAP = 24;
+    int gridW = 4 * CARD + 3 * GAP;
+    int x0 = (SCREEN_W - gridW) / 2, y0 = 130;
+    for (int i = 0; i < ROSTER_N; i++) {
+        int cx = x0 + (i % 4) * (CARD + GAP);
+        int cy = y0 + (i / 4) * (CARD + GAP + 16);
+        bool sel = (i == cursor);
+        if (sel) fillRect(r, cx - 6, cy - 6, CARD + 12, CARD + 12, 240, 200, 40);
+        fillRect(r, cx - 2, cy - 2, CARD + 4, CARD + 4, 18, 36, 90);
+        if (g_chars[i].face) {
+            SDL_Rect d = { cx, cy, CARD, CARD };
+            SDL_RenderCopy(r, g_chars[i].face, nullptr, &d);
+        }
+    }
+    // Blink "press attack"
     if ((SDL_GetTicks() / 500) % 2 == 0)
-        fillRect(r, SCREEN_W/2 - 120, 340, 240, 24, 255, 255, 255);
+        fillRect(r, SCREEN_W/2 - 120, SCREEN_H - 60, 240, 16, 255, 255, 255);
 }
 
 static void renderGameOver(SDL_Renderer* r, bool playerWon, int timer) {
@@ -260,24 +297,31 @@ static void renderGameOver(SDL_Renderer* r, bool playerWon, int timer) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  Game reset
 // ─────────────────────────────────────────────────────────────────────────────
-static void resetGame(lf2::Player& player, Enemy enemies[], GameSt& gameSt) {
-    player.load(&g_dennis);
+static void resetGame(SDL_Renderer* r, lf2::Player& player, int playerIdx,
+                      EnemySlot slots[], GameSt& gameSt)
+{
+    g_chars[playerIdx].loadTextures(r, ROSTER[playerIdx]);
+    player = lf2::Player();
+    player.load(&g_chars[playerIdx].data);
     player.x = 400.f;
     player.z = (float)Z_MIN;
     player.right = true;
 
-    const float ex[]  = { 1600.f, 2200.f, 2800.f };
-    const float ez[]  = { (float)Z_MIN, (float)(Z_MIN + Z_MAX) / 2, (float)Z_MAX };
-    // Striking standoff beside the player (within reach): flank left / right /
-    // left so the trio spreads but every enemy still closes in and connects.
+    const float ex[] = { 1600.f, 2200.f, 2800.f };
+    const float ez[] = { (float)Z_MIN, (float)(Z_MIN + Z_MAX) / 2, (float)Z_MAX };
     const float off[] = { -50.f, 50.f, -50.f };
     for (int i = 0; i < NUM_ENEMIES; i++) {
-        enemies[i] = Enemy();
-        enemies[i].load(&g_firen);
-        enemies[i].a.x     = ex[i];
-        enemies[i].a.z     = ez[i];
-        enemies[i].aimOffset = off[i];
+        int idx = (playerIdx + 1 + i) % ROSTER_N;      // 3 different opponents
+        g_chars[idx].loadTextures(r, ROSTER[idx]);
+        slots[i] = EnemySlot();
+        slots[i].rosterIdx = idx;
+        slots[i].e.load(&g_chars[idx].data);
+        slots[i].e.a.x = ex[i];
+        slots[i].e.a.z = ez[i];
+        slots[i].e.aimOffset = off[i];
+        slots[i].e.frozen = true;   // TEST MODE: born idle; Start enables the AI
     }
+    g_objects.clear();
     gameSt = GameSt::PLAYING;
 }
 
@@ -288,15 +332,14 @@ int main(int, char*[]) {
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK);
     IMG_Init(IMG_INIT_PNG);
 
-    // Character data — must be bundled in the VPK (see CMakeLists.txt).
-    g_dennis = dat::load("app0:/data/dennis.dat");
-    g_firen  = dat::load("app0:/data/firen.dat");
+    g_index = dat::loadIndex("app0:/data/data.txt");
+    for (int i = 0; i < ROSTER_N; i++)
+        g_chars[i].data = dat::load((std::string("app0:/data/") + ROSTER[i] + ".dat").c_str());
 
     SDL_Joystick* joy = nullptr;
     if (SDL_NumJoysticks() > 0) joy = SDL_JoystickOpen(0);
 
-    SDL_Window*   win = SDL_CreateWindow(
-        "LF2 Vita v0.7.0",
+    SDL_Window*   win = SDL_CreateWindow("LF2 Vita v0.8.0",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         SCREEN_W, SCREEN_H, SDL_WINDOW_SHOWN);
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
@@ -304,16 +347,25 @@ int main(int, char*[]) {
 
     Textures tx;
     tx.load(ren);
+    // Faces up-front (small): the select screen needs all of them.
+    for (int i = 0; i < ROSTER_N; i++)
+        g_chars[i].face = loadTex(ren,
+            (std::string("app0:/assets/") + ROSTER[i] + "_f.png").c_str(), false);
 
     lf2::Player player;
-    player.load(&g_dennis);
-    Enemy  enemies[NUM_ENEMIES];
+    EnemySlot   slots[NUM_ENEMIES];
     GameSt gameSt        = GameSt::MENU;
+    int    menuCursor    = 0;
+    int    playerIdx     = 0;
     int    gameOverTimer = 0;
     bool   playerWon     = false;
+    int    lastSwingId   = -1;
+    int    playerPrevFrame = -1;
 
-    bool prevAtk = false, prevJmp = false, prevAny = false;
-    int  lastSwingId = -1;   // player.swingId tracker → re-arms per-swing hit gates
+    bool prevStart = false;
+    bool aiEnabled = false;   // TEST MODE default: enemies frozen until Start
+    bool prevAtk = false, prevJmp = false, prevL = false, prevR = false,
+         prevU = false, prevD = false;
 
     Uint32 nextTick = SDL_GetTicks();
     bool   running  = true;
@@ -326,75 +378,134 @@ int main(int, char*[]) {
         Uint32 now = SDL_GetTicks();
         while (now >= nextTick) {
             InputState raw = readInput(joy);
+            bool atk  = raw.atk && !prevAtk;
+            bool jmp  = raw.jmp && !prevJmp;
+            bool newL = raw.L && !prevL, newR = raw.R && !prevR;
+            bool newU = raw.U && !prevU, newD = raw.D && !prevD;
+            bool newStart = raw.start && !prevStart;
+            prevAtk = raw.atk; prevJmp = raw.jmp; prevStart = raw.start;
+            prevL = raw.L; prevR = raw.R; prevU = raw.U; prevD = raw.D;
 
-            bool atk      = raw.atk && !prevAtk;
-            bool jmp      = raw.jmp && !prevJmp;
-            bool anyPress = raw.any && !prevAny;
-            prevAtk = raw.atk; prevJmp = raw.jmp; prevAny = raw.any;
+            // TEST MODE: enemies spawn frozen (they still react to hits); Start
+            // toggles their AI so specials can be tested on stationary targets.
+            if (newStart) {
+                aiEnabled = !aiEnabled;
+                for (int i = 0; i < NUM_ENEMIES; i++) slots[i].e.frozen = !aiEnabled;
+            }
 
             if (gameSt == GameSt::MENU) {
-                if (anyPress) resetGame(player, enemies, gameSt);
+                if (newR) menuCursor = (menuCursor + 1) % ROSTER_N;
+                if (newL) menuCursor = (menuCursor + ROSTER_N - 1) % ROSTER_N;
+                if (newD) menuCursor = (menuCursor + 4) % ROSTER_N;
+                if (newU) menuCursor = (menuCursor + ROSTER_N - 4) % ROSTER_N;
+                if (atk || jmp) {
+                    playerIdx = menuCursor;
+                    resetGame(ren, player, playerIdx, slots, gameSt);
+                    lastSwingId = -1;
+                    playerPrevFrame = -1;
+                    aiEnabled = false;   // every match starts with frozen enemies
+                }
             }
             else if (gameSt == GameSt::PLAYING) {
-                // NOTE: spc is passed as LEVEL (held state) — the Player computes
-                // its own edge and supports held-Square + direction/jump combos.
                 player.tick(raw.L, raw.R, raw.U, raw.D, atk, jmp, raw.def, raw.spc);
                 for (int i = 0; i < NUM_ENEMIES; i++)
-                    enemies[i].tick(player.x, player.z);
+                    slots[i].e.tick(player.x, player.z);
 
-                // New player swing (any attack start, INCLUDING chained punches)
-                // clears the re-hit timers, re-arming every enemy immediately.
+                // ── opoint spawns (on frame entry) ────────────────────────────
+                if (player.f.frameId != playerPrevFrame) {
+                    spawnOpoints(ren, player.f, 0);
+                    playerPrevFrame = player.f.frameId;
+                }
+                for (int i = 0; i < NUM_ENEMIES; i++) {
+                    if (slots[i].e.a.f.frameId != slots[i].prevFrame) {
+                        spawnOpoints(ren, slots[i].e.a.f, 1);
+                        slots[i].prevFrame = slots[i].e.a.f.frameId;
+                    }
+                }
+
+                // ── objects fly ───────────────────────────────────────────────
+                g_objects.forEach([&](lf2::Object& o) { o.tick(); });
+
+                // ── new player swing re-arms the enemies ─────────────────────
                 if (player.swingId != lastSwingId) {
-                    for (int i = 0; i < NUM_ENEMIES; i++) enemies[i].rehitTimer = 0;
+                    for (int i = 0; i < NUM_ENEMIES; i++) slots[i].e.rehitTimer = 0;
                     lastSwingId = player.swingId;
                 }
 
-                // ── Player attack → enemy bodies ──────────────────────────────
-                // Re-hit is timer-gated (itr vrest/arest), NOT once-per-swing:
-                // multi-hit moves (many_foot flurry) land repeatedly, and the
-                // knockback comes from the itr's own dvx (2 = nudge that keeps
-                // the victim in the combo; 12 = the finisher's launch).
+                // ── player attack → enemies ──────────────────────────────────
                 HitInfo hi;
-                if (actorAttack(player, hi)) {
+                if (fighterAttack(player.f, hi)) {
                     for (int i = 0; i < NUM_ENEMIES; i++) {
                         Box ebody;
-                        if (enemies[i].rehitTimer == 0 && enemies[i].alive() &&
-                            fabsf(player.z - enemies[i].a.z) <= 12.f &&
-                            actorBody(enemies[i].a, ebody) &&
-                            boxOverlap(hi.box, ebody))
+                        Enemy& e = slots[i].e;
+                        int es = e.a.f.state();
+                        // OpenLF2 anti-juggle: a light hit (fall<=40) can't strike
+                        // a victim already falling; a launcher (fall>40) still can.
+                        bool downed = (es == lf2::ST_FALLING && hi.fall <= 40) ||
+                                      es == lf2::ST_LYING;
+                        if (e.rehitTimer == 0 && e.alive() && !downed &&
+                            fabsf(player.z - e.a.z) < (float)hi.zwidth &&
+                            fighterBody(e.a.f, ebody) && boxOverlap(hi.box, ebody))
                         {
-                            enemies[i].rehitTimer = hi.rest;
-                            enemies[i].hitFlash   = 10;
+                            e.rehitTimer = hi.rest;
+                            e.hitFlash   = 10;
                             float kb = (float)(hi.dvx > 0 ? hi.dvx : 1);
-                            enemies[i].a.hit(hi.injury, player.right ? kb : -kb, hi.fall);
+                            e.a.hit(hi.injury, player.right ? kb : -kb, hi.fall);
                         }
                     }
                 }
 
-                // ── Enemy attacks → player body ───────────────────────────────
+                // ── enemy attacks → player ───────────────────────────────────
                 Box pBody;
-                if (player.alive() && actorBody(player, pBody)) {
+                bool havePBody = player.alive() && fighterBody(player.f, pBody);
+                if (havePBody) {
                     for (int i = 0; i < NUM_ENEMIES; i++) {
                         HitInfo ehi;
-                        if (!enemies[i].hasHitPlayer && enemies[i].alive() &&
-                            fabsf(player.z - enemies[i].a.z) <= 12.f &&
-                            actorAttack(enemies[i].a, ehi) &&
-                            boxOverlap(ehi.box, pBody))
+                        Enemy& e = slots[i].e;
+                        if (!e.hasHitPlayer && e.alive() &&
+                            fabsf(player.z - e.a.z) < (float)ehi.zwidth &&
+                            fighterAttack(e.a.f, ehi) && boxOverlap(ehi.box, pBody))
                         {
-                            enemies[i].hasHitPlayer = true;
+                            e.hasHitPlayer = true;
                             float kb = (float)(ehi.dvx > 0 ? ehi.dvx : 1);
-                            player.hit(ehi.injury, enemies[i].a.right ? kb : -kb, ehi.fall);
+                            player.hit(ehi.injury, e.a.right ? kb : -kb, ehi.fall);
                         }
                     }
                 }
 
-                // Bodies never block movement (LF2 lets you pass through); the
-                // per-enemy aim offset keeps the trio from stacking.
+                // ── projectiles hit actors ───────────────────────────────────
+                g_objects.forEach([&](lf2::Object& o) {
+                    if (!o.flying() || o.rehit > 0) return;
+                    HitInfo ohi;
+                    if (!fighterAttack(o.f, ohi)) return;
+                    if (o.team == 0) {                       // player's ball → enemies
+                        for (int i = 0; i < NUM_ENEMIES; i++) {
+                            Box ebody;
+                            Enemy& e = slots[i].e;
+                            if (e.alive() && fabsf(o.f.z - e.a.z) < (float)ohi.zwidth &&
+                                fighterBody(e.a.f, ebody) && boxOverlap(ohi.box, ebody))
+                            {
+                                float kb = (float)(ohi.dvx > 0 ? ohi.dvx : 4);
+                                e.a.hit(ohi.injury, o.f.facingRight ? kb : -kb, ohi.fall);
+                                e.hitFlash = 10;
+                                o.onHit();
+                                o.rehit = ohi.rest;
+                                break;
+                            }
+                        }
+                    } else if (havePBody) {                  // enemy ball → player
+                        if (fabsf(o.f.z - player.z) < (float)ohi.zwidth && boxOverlap(ohi.box, pBody)) {
+                            float kb = (float)(ohi.dvx > 0 ? ohi.dvx : 4);
+                            player.hit(ohi.injury, o.f.facingRight ? kb : -kb, ohi.fall);
+                            o.onHit();
+                            o.rehit = ohi.rest;
+                        }
+                    }
+                });
 
                 bool allDead = true;
                 for (int i = 0; i < NUM_ENEMIES; i++)
-                    if (enemies[i].alive()) { allDead = false; break; }
-
+                    if (slots[i].e.alive()) { allDead = false; break; }
                 if (!player.alive() || allDead) {
                     playerWon     = allDead;
                     gameSt        = GameSt::GAMEOVER;
@@ -409,12 +520,54 @@ int main(int, char*[]) {
         }
 
         if (gameSt == GameSt::MENU) {
-            renderMenu(ren);
+            renderMenu(ren, menuCursor);
         } else {
             int camX = clampI((int)player.x - SCREEN_W / 2, 0, MAP_W - SCREEN_W);
             renderBackground(ren, tx, camX);
-            renderCharacters(ren, tx, player, enemies, camX);
-            renderHUD(ren, tx, player, enemies);
+
+            // Shadows
+            if (tx.shadow) {
+                SDL_Rect ps = { (int)player.x - camX - 18, (int)player.z - 4, 37, 9 };
+                SDL_RenderCopy(ren, tx.shadow, nullptr, &ps);
+                for (int i = 0; i < NUM_ENEMIES; i++) {
+                    SDL_Rect es = { (int)slots[i].e.a.x - camX - 18,
+                                    (int)slots[i].e.a.z - 4, 37, 9 };
+                    SDL_RenderCopy(ren, tx.shadow, nullptr, &es);
+                }
+                g_objects.forEach([&](lf2::Object& o) {
+                    SDL_Rect os = { (int)o.f.x - camX - 18, (int)o.f.z - 4, 37, 9 };
+                    SDL_RenderCopy(ren, tx.shadow, nullptr, &os);
+                });
+            }
+
+            // Actors, painter's order by z
+            struct DrawRef { float z; int kind; int idx; };   // 0 player, 1 enemy
+            DrawRef list[NUM_ENEMIES + 1];
+            list[0] = { player.z, 0, 0 };
+            for (int i = 0; i < NUM_ENEMIES; i++) list[i + 1] = { slots[i].e.a.z, 1, i };
+            for (int i = 1; i < NUM_ENEMIES + 1; i++) {
+                DrawRef key = list[i]; int j = i - 1;
+                while (j >= 0 && list[j].z > key.z) { list[j + 1] = list[j]; j--; }
+                list[j + 1] = key;
+            }
+            for (int i = 0; i < NUM_ENEMIES + 1; i++) {
+                if (list[i].kind == 0) {
+                    drawFighter(ren, player.f, g_chars[playerIdx].sheets, camX);
+                } else {
+                    EnemySlot& s = slots[list[i].idx];
+                    bool flash = s.e.hitFlash > 0;
+                    drawFighter(ren, s.e.a.f, g_chars[s.rosterIdx].sheets, camX,
+                                255, flash ? 80 : 255, flash ? 80 : 255);
+                }
+            }
+
+            // Projectiles on top
+            g_objects.forEach([&](lf2::Object& o) {
+                if (o.sheetSlot >= 0 && o.sheetSlot < (int)g_objBank.size())
+                    drawFighter(ren, o.f, g_objBank[o.sheetSlot].sheets, camX);
+            });
+
+            renderHUD(ren, player, playerIdx, slots);
             if (gameSt == GameSt::GAMEOVER)
                 renderGameOver(ren, playerWon, gameOverTimer);
         }
