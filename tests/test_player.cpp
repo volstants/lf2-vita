@@ -129,14 +129,14 @@ int main() {
 
     // Walking + attack = PLAIN PUNCH (holding a direction must NOT fire specials).
     p.f.setFrame(lf2::fid::STANDING, false); p.right = true; p.h = 0.f;
-    p.comboNext = false; p.comboQueued = false; p.seqStage = 0;
+    p.comboNext = false; p.comboQueued = false;
     p.tick(false, true, false, false, true, false);       // holding forward + attack
     CHECK(p.f.frameId == lf2::fid::PUNCH, "walk-forward + attack throws a plain punch");
 
     // Rapid re-press BUFFERS the chain: punch2 fires when punch1 ENDS, and each
     // chained punch is a new swing (re-arms the per-swing hit gates).
     p.f.setFrame(lf2::fid::STANDING, false); p.comboNext = false; p.comboQueued = false;
-    p.seqStage = 0;
+
     int swing0 = p.swingId;
     p.tick(false,false,false,false, true, false);         // attack → punch1
     CHECK(p.f.frameId == lf2::fid::PUNCH,  "attack throws punch1 (60)");
@@ -149,72 +149,51 @@ int main() {
     CHECK(p.f.frameId == lf2::fid::PUNCH2, "buffered chain fires punch2 when punch1 ends");
     CHECK(p.swingId == swing0 + 2,          "chained punch counts as a new swing");
 
-    // Special = Square + direction. Mode A: direction held, tap Square → fires now.
-    p.f.setFrame(lf2::fid::STANDING, false); p.right = true; p.h = 0.f;
-    p.comboNext = false; p.comboQueued = false; p.seqStage = 0;
-    p.tick(false, true, false,false, false,false, false, true);  // hold F + Square
-    CHECK(p.f.frameId == 235, "hold-forward + Square fires hit_Fa special (235)");
+    // Square + Directional (bare, no A) = the D+dir+A move (hit_?a). Forward=235.
+    auto sq = [&]{ p.f.setFrame(lf2::fid::STANDING, false); p.right = true;
+                   p.h = 0.f; p.vy = 0.f; p.comboNext = false; p.comboQueued = false;
+                   p.seqStage = 0; p.f.mp = p.f.maxMp;   // MP starts at 200 in-game
+                   p.prevSpc = p.prevL = p.prevR = p.prevU = p.prevDn = p.prevDef = false; };
+    sq();
+    p.tick(false, true, false,false, false,false, false, true);  // hold Forward + Square
+    CHECK(p.f.frameId == 235, "Square + forward (bare) fires hit_Fa (235)");
 
-    // Mode B: tap Square, then tap the direction within the window.
-    // (spc is a LEVEL now — release it between taps / reset prevSpc.)
-    p.f.setFrame(lf2::fid::STANDING, false); p.seqStage = 0;
-    p.prevL = p.prevR = false; p.prevSpc = false;
-    p.tick(false,false,false,false, false,false, false, true);   // tap Square (arms)
-    p.tick(false, true, false,false, false,false, false, false); // tap forward → fires
-    CHECK(p.f.frameId == 235, "Square then forward fires hit_Fa special (235)");
+    // Square is FORWARD-ONLY: Square + Down does NOT fire the vertical special.
+    sq();
+    p.tick(false,false, false,true,  false,false, false, true);  // Square + Down
+    CHECK(p.f.frameId != 265, "Square + down does NOT fire hit_Da (Square = forward only)");
 
-    // Expired window: Square, wait, then direction → just walks, no special.
-    p.f.setFrame(lf2::fid::STANDING, false); p.seqStage = 0;
-    p.prevR = false; p.prevSpc = false;
-    p.tick(false,false,false,false, false,false, false, true);   // tap Square
-    for (int i = 0; i < 20; ++i)                                  // window expires
-        p.tick(false,false,false,false, false,false, false, false);
-    p.tick(false, true, false,false, false,false, false, false); // forward after timeout
-    CHECK(p.f.frameId != 235, "expired Square window does not fire the special");
+    // Faithful command Defend → Down → Attack fires the vertical special (Da 265).
+    sq();
+    p.tick(false,false,false,false, false,false, true, false);   // tap Defend (guard)
+    p.tick(false,false,false,true,  false,false, true, false);   // Down (still guarding)
+    p.tick(false,false,false,false, true, false, true, false);   // Attack → hit_Da
+    CHECK(p.f.frameId == 265, "Defend->Down->Attack fires hit_Da (Shrafe 265)");
 
-    // Square + Jump = jump special (hit_Fj 280, c_foot) — and does NOT jump.
-    p.f.setFrame(lf2::fid::STANDING, false); p.right = true; p.h = 0.f;
-    p.seqStage = 0; p.prevSpc = false;
-    p.tick(false,false,false,false, false, true, false, true);   // Square + Jump together
-    CHECK(p.f.frameId == 280, "Square+Jump fires the jump special hit_Fj (280)");
+    // Neutral Square (no direction) = forward special (hit_Fa).
+    sq();
+    p.tick(false,false,false,false, false,false, false, true);
+    CHECK(p.f.frameId == 235, "neutral Square fires the forward special (235)");
+
+    // Square + Directional + Jump = the D+dir+J jump-special (hit_?j). Fwd=280.
+    sq();
+    p.tick(false, true, false,false, false, true, false, true);  // Forward + Jump + Square
+    CHECK(p.f.frameId == 280, "Square + forward + Jump fires hit_Fj (280)");
     CHECK(p.grounded(),       "jump special does not also launch a jump");
-    // ...and the armed order too: Square, then Jump.
-    p.f.setFrame(lf2::fid::STANDING, false); p.seqStage = 0; p.h = 0.f; p.prevSpc = false;
-    p.tick(false,false,false,false, false,false, false, true);   // tap Square (arms)
-    p.tick(false,false,false,false, false, true, false, false);  // tap Jump
-    CHECK(p.f.frameId == 280, "Square then Jump fires hit_Fj (280)");
 
-    // The c_foot loop (284→287→284) is INTENTIONALLY infinite in the .dat; the
-    // engine must break it by draining MP (frames carry mp:-17) and exit via
-    // hit_d (288) when MP runs dry — otherwise the whirlwind slides forever.
+    // c_foot loop (284→287→284) is INTENTIONALLY infinite; the engine breaks it
+    // by draining MP (frames carry mp:-17), exiting via hit_d (288) when dry.
     {
         int guard2 = 0;
         while (p.state() == lf2::ST_ATTACK && guard2++ < 3000)
             p.tick(false,false,false,false, false,false, false,false);
-        CHECK(guard2 < 3000,           "c_foot loop terminates (MP drain breaks it)");
-        CHECK(p.f.mp < p.f.maxMp,      "looping special drained MP");
+        CHECK(guard2 < 3000,      "c_foot loop terminates (MP drain breaks it)");
+        CHECK(p.f.mp < p.f.maxMp, "looping special drained MP");
     }
-    // Early exit: pressing Defend during the loop bails out via hit_d (288).
-    p.f.setFrame(lf2::fid::STANDING, false); p.seqStage = 0; p.h = 0.f;
-    p.prevSpc = false; p.f.mp = p.f.maxMp;
-    p.tick(false,false,false,false, false, true, false, true);   // Square+Jump → 280
-    for (int i = 0; i < 12; ++i)                                  // into the loop
-        p.tick(false,false,false,false, false,false, false,false);
-    p.tick(false,false,false,false, false,false, true, false);   // press Defend
-    CHECK(p.f.frameId >= 288 && p.f.frameId <= 290,
-          "Defend mid-loop exits c_foot via hit_d (288)");
-
-    // Neutral Square (tap alone, no direction, then release) = forward special.
-    p.f.setFrame(lf2::fid::STANDING, false); p.right = true; p.h = 0.f;
-    p.seqStage = 0; p.prevSpc = false;
-    p.tick(false,false,false,false, false,false, false, true);   // press+hold Square (arms)
-    p.tick(false,false,false,false, false,false, false, false);  // release → neutral special
-    CHECK(p.f.frameId == 235, "neutral Square (tap) fires the forward special (235)");
 
     // Attack alone still punches (Square is the only special trigger).
-    p.f.setFrame(lf2::fid::STANDING, false); p.seqStage = 0; p.comboNext = false;
-    p.h = 0.f; p.vy = 0.f; p.prevSpc = false;
-    p.tick(false, true, false, false, true, false, false, false); // walk + attack
+    sq();
+    p.tick(false, true, false, false, true, false, false, false); // walk + attack, no Square
     CHECK(p.f.frameId == lf2::fid::PUNCH, "attack never fires specials without Square");
 
     // Jump attack: pressing attack in the air enters the jump-attack frames.

@@ -74,14 +74,14 @@ int main() {
         int cost = f235 ? f235->mp : 0;
         std::printf("        (custo mp do frame 235: %d)\n", cost);
         int mp0 = p.f.mp;
-        p.prevSpc = false; p.seqStage = 0; p.right = true;
+        p.prevSpc = false; p.right = true;
         p.tick(false, true, false, false, false, false, false, true); // F+Square
         CHECK(p.f.frameId == 235,      "special still fires with full MP");
         if (cost > 0)
             CHECK(p.f.mp <= mp0 - cost + 1, "special deducts the frame's mp cost");
         // Drain MP → special must whiff.
         lf2::Player p2; p2.load(&dennis);
-        p2.f.mp = 0; p2.prevSpc = false; p2.seqStage = 0; p2.right = true;
+        p2.f.mp = 0; p2.prevSpc = false; p2.right = true;
         p2.tick(false, true, false, false, false, false, false, true);
         if (cost > 0)
             CHECK(p2.f.frameId != 235, "empty MP blocks the special");
@@ -124,6 +124,52 @@ int main() {
         b2.spawn(&ball, 0, 300.f, victim.f.y, 460.f, true, 0, 0);
         bool offLine = std::fabs(b2.f.z - victim.z) <= 12.f;
         CHECK(!offLine, "ball on a different z-line is correctly out of range");
+    }
+
+    // ── Weapon object: rests on the ground, frozen while held ────────────────
+    dat::File knife = dat::load("data/weapon4.dat");
+    if (!knife.frames.empty()) {
+        lf2::Object w;
+        w.spawn(&knife, 0, 700.f, 365.f, 365.f, true, lf2::weapon_frame::ON_GROUND, 0);
+        w.weaponType = 1;
+        w.restOnGround(700.f, 365.f, 365.f, true);
+        CHECK(w.f.frameId == lf2::weapon_frame::ON_GROUND, "weapon rests on frame 64");
+        float wx = w.f.x;
+        for (int i = 0; i < 30; ++i) w.tick();
+        CHECK(std::fabs(w.f.x - wx) < 0.01f && w.active, "grounded weapon stays put (no drift/despawn)");
+        w.held = true; w.f.x = 123.f;
+        for (int i = 0; i < 10; ++i) w.tick();
+        CHECK(std::fabs(w.f.x - 123.f) < 0.01f, "held weapon is frozen (holder positions it)");
+
+        // <weapon_strength_list>: the real damage of a swing, per wpoint.attacking.
+        CHECK(knife.strength[1].valid && knife.strength[1].injury == 45 &&
+              knife.strength[1].fall == 40, "strength[1] normal: injury 45, fall 40");
+        CHECK(knife.strength[4].valid && knife.strength[4].injury == 55 &&
+              knife.strength[4].fall == 70, "strength[4] dash: injury 55, fall 70");
+        // A held weapon's own frame carries a kind-2 wpoint (the grip point) and
+        // a kind-5 itr (its strike box) — both required by the hold/attack code.
+        const dat::Frame* onHand = knife.frame(23);
+        bool grip = false, k5 = false;
+        if (onHand) {
+            for (const auto& wpt : onHand->wpoints) if (wpt.kind == 2) grip = true;
+            for (const auto& it : onHand->itrs)     if (it.kind == 5)  k5 = true;
+        }
+        CHECK(grip, "on_hand frame has its own kind-2 wpoint (grip alignment)");
+        CHECK(k5,   "on_hand frame has a kind-5 itr (weapon strike box)");
+
+        // Throw: flies forward, gravity pulls it down, lands and rests.
+        lf2::Object t;
+        t.spawn(&knife, 0, 500.f, 300.f, 400.f, true, lf2::weapon_frame::ON_GROUND, 0);
+        t.weaponType = 1; t.groundY = 400.f;
+        t.throwFrom(500.f, 400.f, 400.f, /*right=*/true, 12.f, -8.f, 0.f);
+        CHECK(t.thrown && !t.held,    "throwFrom marks the weapon as airborne");
+        CHECK(t.f.x > 500.f,          "thrown weapon is placed ahead of the holder");
+        float tx = t.f.x;
+        t.tick();
+        CHECK(t.f.x > tx,             "thrown weapon travels forward");
+        int g2 = 0;
+        while (t.thrown && g2++ < 200) t.tick();
+        CHECK(!t.thrown && t.active,  "thrown weapon lands and rests on the ground");
     }
 
     if (g_fail) { std::printf("\n%d CHECK(S) FAILED\n", g_fail); return 1; }

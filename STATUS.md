@@ -15,11 +15,19 @@ dúvida de mecânica em vez de inferir só dos dados):
   (zwidth/default), spawn de opoint (z herdado), códigos de next 1000+, arest/vrest.
 - **F.LF** — github.com/volstants/F.LittleFighter — reimplementação em JS (referência
   de comportamento de alto nível; foi a base dos valores hardcoded iniciais).
-Como consultar: clone em caminho NATIVO da sandbox (git não gerencia locks no
-mount): `cd ~ && git clone --depth 1 https://github.com/xsoameix/openlf2`. Ler
-com grep/sed via bash (o tool Read não alcança fora das pastas montadas). É
-decompilação PARCIAL: detecção de colisão está pronta (src/class_global.c ~150-240);
-a aplicação de fall/injury ainda referencia endereços crus não decompilados.
+**DECOMPILAÇÃO PRÓPRIA (melhor fonte, 2026-07-25):**
+`reference/decomp/lf2_decomp.c` — 351 funções do `lf2.exe` real via Ghidra headless
+(ver `tools/DECOMPILE.md` + `tools/ghidra_export_c.py`). Gitignored. Consultar por
+grep direcionado; funções sem nome (`FUN_00401234`), identificar por constantes.
+Já validado nele: `FUN_004171c0` = overlap AABB, idêntico ao nosso `boxOverlap`;
+`abs(dz) < 0xf` confirma banda z = **15** (F.LF dizia 12 — o binário vence).
+Ressalva: 351 funções é subconjunto (auto-análise); se faltar algo, re-rodar com
+análise agressiva.
+
+OpenLF2 (secundário): clone em caminho NATIVO da sandbox (git não gerencia locks no
+mount): `cd ~ && git clone --depth 1 https://github.com/xsoameix/openlf2`. É
+decompilação PARCIAL: detecção de colisão pronta (src/class_global.c ~150-240);
+a aplicação de fall/injury referencia endereços crus não decompilados.
 
 Achados do OpenLF2 já aplicados (2026-07-24):
 - Banda de z: `abs(dz) < itr->zwidth`, default **15** (não 12). itr especifica zwidth

@@ -87,7 +87,8 @@ struct Fighter {
     void load(const dat::File* d) {
         data  = d;
         maxHp = hp = (int)d->header.get("hp", 500.f);
-        maxMp = mp = (int)d->header.get("mp", 500.f);
+        maxMp = (int)d->header.get("mp", 500.f);
+        mp    = 200;    // F.LF global.js: mp_start = 200 (not full), never overridden
         removed = false;
         setFrame(STANDING_FRAME, /*applyDv=*/false);
     }
@@ -105,7 +106,8 @@ struct Fighter {
     void applyDvy(int dv) {
         if (dv == DV_KEEP) return;
         if (dv == DV_STOP) { vy = 0.f; return; }
-        vy = (float)dv;                       // negative = upward, no facing flip
+        // F.LF frame_force(): dvy ACCUMULATES (vy += dvy) while dvx/dvz SET.
+        vy += (float)dv;                      // negative = upward, no facing flip
     }
     void applyDvz(int dv) {
         if (dv == DV_KEEP) return;
@@ -237,10 +239,13 @@ struct Fighter {
     }
 
     // A single sprite-relative point (opoint/wpoint) in world space.
+    // Sprite-space offset (px - centerx) applies as-is facing right, mirrored
+    // facing left — same convention as worldBox. Verified against both an
+    // opoint (fireball x:95, cx:41 → spawns in FRONT) and a wpoint.
     void pointWorld(int px, int py, float& wx, float& wy) const {
         const dat::Frame* f = cur();
         int cx = f ? f->centerx : 0, cy = f ? f->centery : 0;
-        wx = facingRight ? (x + (px - cx)) : (x + (cx - px));
+        wx = facingRight ? (x + (px - cx)) : (x - (px - cx));
         wy = y + (py - cy);
     }
 

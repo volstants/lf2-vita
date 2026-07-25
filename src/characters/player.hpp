@@ -26,6 +26,13 @@ namespace fid {
     constexpr int WALK_LAST = 8;
     constexpr int RUNNING   = 9;   // 9-11
     constexpr int RUN_LAST  = 11;
+    // Weapon frames (F.LF character.js, confirmed in dennis.dat):
+    //   pick up  -> 115 light / 116 heavy   (picking_light / picking_heavy)
+    //   attack   -> 20 or 25 (normal_weapon_atck, the original picks at random)
+    //   throw    -> 45 light / 50 heavy     (light_/heavy_weapon_thw)
+    constexpr int WEAPON_ATTACK  = 20, WEAPON_ATTACK2 = 25;
+    constexpr int PICK_LIGHT     = 115, PICK_HEAVY    = 116;
+    constexpr int THROW_LIGHT    = 45,  THROW_HEAVY   = 50;
     constexpr int PUNCH       = 60; // punch 1 (60-63)
     constexpr int PUNCH2      = 65; // punch 2 (65-68) — combo alternates 60/65
     constexpr int JUMP_ATTACK = 80; // 80-82 (state 3)
@@ -58,8 +65,8 @@ struct Player {
     // LF2 Falling Points: start 0, a hit ADDS the itr's `fall`, decays 1/frame.
     // FP > 40 → Dance of Pain (stunned in place); FP > 60 → knocked down, FP=0.
     // (Community-documented; z-band/anti-juggle cross-checked in OpenLF2.)
-    static constexpr int FP_DOP = 40, FP_FALL = 60;
-    int   fp = 0;
+    static constexpr int FP_DOP = 40, FP_FALL = 60;   // DoP / KO thresholds
+    int   fp = 0, fpAcc = 0;
 
     // Input edge / double-tap-to-run tracking.
     bool  prevL = false, prevR = false, prevU = false, prevDn = false, prevDef = false,
@@ -67,20 +74,24 @@ struct Player {
     int   tapDir = 0, tapTimer = 0;
     static constexpr int RUN_TAP_WINDOW = 9;   // ticks to land the 2nd tap (~0.3s)
 
-    // Special input: SQUARE arms it, a direction fires it. Both orders work —
-    // hold a direction and tap Square (fires immediately), or tap Square then a
-    // direction within the window. Attack alone NEVER fires specials.
-    int   seqStage = 0;    // 0 idle · 1 = Square armed, waiting for a direction
+    // Special input, two paths:
+    //  • SQUARE = shortcut for the HORIZONTAL (forward) special only: Square → hit_Fa,
+    //    Square+Jump → hit_Fj. Up/Down on Square are ignored on purpose.
+    //  • Faithful command: Defend → direction → A/J (all 6 slots) — how the
+    //    original inputs D+dir+A / D+dir+J, incl. the vertical specials.
+    int   wantSlot = 0;    // per-tick: frame hit_ id to fire
+    int   seqStage = 0;    // 0 idle · 1 = Defend pressed · 2 = Defend+dir latched
+    int   seqDir   = 0;    // 0 forward · 1 up · 2 down
     int   seqTimer = 0;
-    int   wantSpecial = 0; // per-tick: 1 = F (sets facing) · 2 = Up · 3 = Down
-    bool  wantRight = true;
-    static constexpr int SEQ_WINDOW = 15;      // ~0.5 s to press the direction
+    static constexpr int SEQ_WINDOW = 15;   // ~0.5 s between the command's keys
 
     // Attack-swing counter: bumped every time a NEW swing starts (punch, chained
     // punch, run/air attack, special). main.cpp uses it to re-arm per-swing hit
     // gates — without it, chained punches after the first never connect.
     int   swingId = 0;
     bool  comboQueued = false;                 // atk pressed during a punch → chain at its end
+    int   heldWeapon  = -1;    // object-pool index of a held weapon, or -1
+    bool  heavyWeapon = false; // the held weapon is type 2 (stone/box)
 
     // Locomotion animation cursor (walking/running cycle their own frames; the
     // frame-graph `next` only handles idle/attacks).
@@ -152,45 +163,45 @@ struct Player {
     void tick(bool L, bool R, bool U, bool D, bool atk, bool jmp,
               bool def = false, bool spc = false) {
         // Input edge + double-tap bookkeeping (every tick).
-        bool newL = L && !prevL, newR = R && !prevR;
-        bool newU = U && !prevU, newDn = D && !prevDn;
+        bool newL = L && !prevL, newR = R && !prevR;   // run double-tap edges
+        bool newU = U && !prevU, newDn = D && !prevDn, newSpc = spc && !prevSpc;
         prevL = L; prevR = R; prevU = U; prevDn = D;
         if (tapTimer > 0) --tapTimer;
-        if (fp > 0) --fp;                        // falling points decay 1/frame
+        // F.LF global.js: recover.fall = -0.45 per TU (not 1). Accumulated in
+        // hundredths so the engine stays integer-only.
+        if (fp > 0) { fpAcc += 45; while (fpAcc >= 100 && fp > 0) { fpAcc -= 100; --fp; } }
         if ((++mpRegenAcc & 1) == 0 && f.mp < f.maxMp) ++f.mp;   // ~15 MP/s regen
         if (f.removed) { f.removed = false; f.setFrame(fid::STANDING); }   // 1000-code safety
 
-        // Special machine. `spc` is the Square LEVEL (held state); edges are
-        // computed here. Three ways to fire, so human timing never drops one:
-        //   1. Square pressed while a direction/jump is already held → fires now.
-        //   2. Direction/Jump tapped while Square is HELD → fires (Smash-style).
-        //   3. Square tapped alone → arms for SEQ_WINDOW; next dir/jump fires.
-        // Square+Jump = the jump special (hit_Fj — c_foot), mirroring D>J.
-        bool newSpc = spc && !prevSpc, relSpc = !spc && prevSpc; prevSpc = spc;
-        wantSpecial = 0;
-        if (seqTimer > 0) --seqTimer; else seqStage = 0;
-        if (newSpc) {
-            if      (U)      { wantSpecial = 2; }
-            else if (D)      { wantSpecial = 3; }
-            else if (L || R) { wantSpecial = 1; wantRight = R; }
-            else if (jmp)    { wantSpecial = 4; }
-            else             { seqStage = 1; seqTimer = SEQ_WINDOW; }  // arm, await dir/jump
-        } else if (spc) {                       // Square HELD: any new press fires
-            if      (newU)         { wantSpecial = 2; }
-            else if (newDn)        { wantSpecial = 3; }
-            else if (newL || newR) { wantSpecial = 1; wantRight = newR; }
-            else if (jmp)          { wantSpecial = 4; }
-        } else if (seqStage == 1) {             // armed by an earlier tap
-            if      (newU)         { wantSpecial = 2; seqStage = 0; }
-            else if (newDn)        { wantSpecial = 3; seqStage = 0; }
-            else if (newL || newR) { wantSpecial = 1; wantRight = newR; seqStage = 0; }
-            else if (jmp)          { wantSpecial = 4; seqStage = 0; }
+        prevSpc = spc;
+        bool newDef = def && !prevDef; prevDef = def;
+        wantSlot = 0;
+        bool atkConsumed = false, jumpConsumed = false;
+        const dat::Frame* fr = f.cur();
+
+        // (1) SQUARE — forward special only (the horizontal D+>+A / D+>+J moves).
+        if (spc && fr) {
+            if (L) right = false;
+            if (R) right = true;
+            if (jmp) { wantSlot = fr->hit_Fj; jumpConsumed = true; }
+            else     { wantSlot = fr->hit_Fa; if (atk) atkConsumed = true; }
+            (void)newSpc;
         }
-        // Square TAPPED alone (armed then released, no direction) → the neutral
-        // special = the character's forward special (hit_Fa). Gives every fighter
-        // its signature move on a single button.
-        if (relSpc && seqStage == 1) { wantSpecial = 1; seqStage = 0; }
-        bool jumpConsumed = (wantSpecial == 4);   // don't ALSO jump on a jump special
+
+        // (2) Faithful command: Defend → direction → A/J → the frame's hit_ slot.
+        if (seqTimer > 0) --seqTimer; else seqStage = 0;
+        if (newDef) { seqStage = 1; seqDir = 0; seqTimer = SEQ_WINDOW; }
+        // Direction must be pressed while Defend is still HELD (LF2's D+dir+A with
+        // D held) — so a stray guard tap then walk+attack can't fire a special.
+        else if (seqStage >= 1 && def && (newU || newDn || newL || newR)) {
+            seqDir = newU ? 1 : newDn ? 2 : 0;
+            if (newR) right = true; else if (newL) right = false;
+            seqStage = 2; seqTimer = SEQ_WINDOW;
+        }
+        if (seqStage == 2 && fr && !wantSlot) {
+            if (atk)      { wantSlot = seqDir==1?fr->hit_Ua:seqDir==2?fr->hit_Da:fr->hit_Fa; atkConsumed=true;  seqStage=0; }
+            else if (jmp) { wantSlot = seqDir==1?fr->hit_Uj:seqDir==2?fr->hit_Dj:fr->hit_Fj; jumpConsumed=true; seqStage=0; }
+        }
 
         if (!grounded()) { airborneTick(U, D, atk); syncAnchor(); return; }
 
@@ -222,7 +233,15 @@ struct Player {
             if (R) right = true;
             if (trySpecial()) { }                        // Square + direction/jump
             else if (def) { f.setFrame(fid::DEFEND); }   // raise guard (blocks move/atk)
-            else if (atk) { throwPunch(); }              // plain attack = punch, ALWAYS
+            else if (atk && !atkConsumed) {                   // plain attack
+                if (heldWeapon >= 0) {
+                    // Holding a weapon: a held direction throws it, otherwise swing.
+                    if (L || R) f.setFrame(heavyWeapon ? fid::THROW_HEAVY : fid::THROW_LIGHT);
+                    else        f.setFrame((swingId & 1) ? fid::WEAPON_ATTACK2
+                                                        : fid::WEAPON_ATTACK);
+                    ++swingId;
+                } else throwPunch();
+            }
             else if (jmp && !jumpConsumed) { startJump(L || R); }
             else {
                 comboNext = false;                       // idle → next attack starts fresh
@@ -305,16 +324,7 @@ struct Player {
     // still fire. Neutral Square = forward. NOTE: projectile specials animate;
     // their object is emitted by the opoint system.
     bool trySpecial() {
-        if (!wantSpecial) return false;
-        const dat::Frame* fr = f.cur();
-        if (!fr) { wantSpecial = 0; return false; }
-        if (wantSpecial == 1) right = wantRight;   // F-special faces the pressed side
-        auto pick = [](int a, int j) { return a > 0 ? a : j; };
-        int id = (wantSpecial == 1) ? pick(fr->hit_Fa, fr->hit_Fj)
-               : (wantSpecial == 2) ? pick(fr->hit_Ua, fr->hit_Uj)
-               : (wantSpecial == 3) ? pick(fr->hit_Da, fr->hit_Dj)
-               :                      pick(fr->hit_Fj, fr->hit_ja);  // Square+Jump
-        wantSpecial = 0;                           // consumed either way
+        int id = wantSlot; wantSlot = 0;
         if (id <= 0) return false;
         // MP gate: the move's entry frame declares its cost. Not enough → the
         // input just whiffs (like the original when the blue bar runs dry).
@@ -383,7 +393,13 @@ struct Player {
     // ── Running ──────────────────────────────────────────────────────────────
     void runTick(bool L, bool R, bool U, bool D, bool atk, bool jmp) {
         if (trySpecial()) return;                                     // Square works mid-run
-        if (atk) { f.setFrame(fid::RUN_ATTACK); ++swingId; return; }  // running attack
+        if (atk) {                                                    // running attack (may cost MP)
+            const dat::Frame* rf = f.data ? f.data->frame(fid::RUN_ATTACK) : nullptr;
+            int cost = rf ? rf->mp : 0;
+            if (cost > 0 && f.mp < cost) return;
+            if (cost > 0) f.mp -= cost;
+            f.setFrame(fid::RUN_ATTACK); ++swingId; return;
+        }
         if (jmp) { startDash();                            return; }  // running jump = dash
         bool keepDir = right ? (R && !L) : (L && !R);
         if (!keepDir) { f.setFrame(fid::STANDING); return; }

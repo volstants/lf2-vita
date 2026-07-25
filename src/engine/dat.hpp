@@ -167,8 +167,17 @@ struct Frame {
     std::vector<Bpoint> bpoints;
 };
 
+// <weapon_strength_list> entries: the REAL damage of a held weapon's swing.
+// Selected by the holder's wpoint.attacking (1 normal · 2 jump · 3 run · 4 dash).
+struct StrengthEntry {
+    int dvx = 0, dvy = 0, fall = 20, vrest = 0, arest = 0,
+        bdefend = 0, injury = 0, effect = 0;
+    bool valid = false;
+};
+
 struct File {
     Header header;
+    StrengthEntry strength[8];   // index = entry id (1..7)
     std::vector<Frame> frames;                    // in file order
     std::unordered_map<int, int> frameIndex;      // frame id → index in frames
     const Frame* frame(int id) const {
@@ -437,7 +446,37 @@ inline File parse(const std::string& text) {
             continue;
         }
 
-        // ── Other top-level blocks (<weapon_strength_list> etc.) — skip ───────
+        // ── <weapon_strength_list> ────────────────────────────────────────────
+        //   entry: 1 normal
+        //     dvx: 2  fall: 40  vrest: 10  bdefend: 16  injury: 45  effect: 1
+        if (t == "<weapon_strength_list>") {
+            int cur = -1;
+            while (!tk.eof()) {
+                std::string k = tk.next();
+                if (k == "<weapon_strength_list_end>") break;
+                if (k == "entry:") {
+                    cur = tk.nextInt();
+                    tk.restOfLine();                     // the name (normal/jump/…)
+                    if (cur >= 0 && cur < 8) out.strength[cur].valid = true;
+                    continue;
+                }
+                if (cur < 0 || cur >= 8 || !isKey(k)) continue;
+                StrengthEntry& se = out.strength[cur];
+                std::string kk = keyName(k);
+                int v = tk.nextInt();
+                if      (kk == "dvx")     se.dvx     = v;
+                else if (kk == "dvy")     se.dvy     = v;
+                else if (kk == "fall")    se.fall    = v;
+                else if (kk == "vrest")   se.vrest   = v;
+                else if (kk == "arest")   se.arest   = v;
+                else if (kk == "bdefend") se.bdefend = v;
+                else if (kk == "injury")  se.injury  = v;
+                else if (kk == "effect")  se.effect  = v;
+            }
+            continue;
+        }
+
+        // ── Other top-level blocks — skip ────────────────────────────────────
     }
     return out;
 }

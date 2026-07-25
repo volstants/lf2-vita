@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <deque>
 
 #include "engine/types.hpp"
 #include "engine/render.hpp"
@@ -56,7 +57,15 @@ struct ObjAssets {
     dat::File data;
     std::vector<SDL_Texture*> sheets;
 };
-static std::vector<ObjAssets> g_objBank;
+// DEQUE, not vector: live Objects hold `&entry.data` pointers, and a vector
+// reallocation on the next spawn would dangle every one of them (crash).
+static std::deque<ObjAssets> g_objBank;
+
+// Index of an entry, since deque has no contiguous storage for pointer math.
+static int objBankIndex(const ObjAssets* oa) {
+    for (size_t i = 0; i < g_objBank.size(); ++i) if (&g_objBank[i] == oa) return (int)i;
+    return -1;
+}
 
 static ObjAssets* objAssets(SDL_Renderer* r, int oid) {
     for (auto& o : g_objBank) if (o.oid == oid) return &o;
@@ -217,7 +226,7 @@ static void spawnOpoints(SDL_Renderer* r, const lf2::Fighter& f, int team) {
         f.pointWorld(op.x, op.y, wx, wy);
         bool faceRight = (op.facing == 1) ? !f.facingRight : f.facingRight;
         float vx0 = faceRight ? (float)op.dvx : -(float)op.dvx;   // launch in facing dir
-        o->spawn(&oa->data, (int)(oa - &g_objBank[0]), wx, wy, f.z,
+        o->spawn(&oa->data, objBankIndex(oa), wx, wy, f.z,
                  faceRight, op.action, team, vx0, (float)op.dvy);
     }
 }
@@ -322,7 +331,33 @@ static void resetGame(SDL_Renderer* r, lf2::Player& player, int playerIdx,
         slots[i].e.frozen = true;   // TEST MODE: born idle; Start enables the AI
     }
     g_objects.clear();
+
+    // Test weapons on the ground (knife 120 = light, stone 150 = heavy/solid).
+    // Stand next to one and press Attack to pick it up.
+    const int woids[] = { 120, 150 };
+    const float wxs[]  = { 700.f, 1000.f };
+    for (int i = 0; i < 2; i++) {
+        ObjAssets* oa = objAssets(r, woids[i]);
+        if (!oa) continue;
+        lf2::Object* o = g_objects.alloc();
+        if (!o) continue;
+        o->spawn(&oa->data, objBankIndex(oa), wxs[i], (float)Z_MIN, (float)Z_MIN,
+                 true, lf2::weapon_frame::ON_GROUND, /*team=*/0);
+        const dat::ObjectEntry* e = g_index.object(woids[i]);
+        o->weaponType = e ? e->type : 1;
+        o->restOnGround(wxs[i], (float)Z_MIN, (float)Z_MIN, true);
+    }
     gameSt = GameSt::PLAYING;
+}
+
+// Current-frame wpoint. Holder frames use kind 1 (hold) / 3 (throw); a held
+// weapon's own frames use kind 2. Returns the kind found (0 = none).
+static int fighterWpoint(const lf2::Fighter& f, dat::Wpoint& out) {
+    const dat::Frame* fr = f.cur();
+    if (!fr) return 0;
+    for (const auto& w : fr->wpoints)
+        if (w.kind == 1 || w.kind == 2 || w.kind == 3) { out = w; return w.kind; }
+    return 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -426,6 +461,76 @@ int main(int, char*[]) {
                 // ── objects fly ───────────────────────────────────────────────
                 g_objects.forEach([&](lf2::Object& o) { o.tick(); });
 
+                // ── weapons: pick up / hold / drop ────────────────────────────
+                // Pick up a ground weapon by walking over it while the current
+                // frame offers a hold point (wpoint kind 1).
+                // Pick up: press ATTACK next to a grounded weapon (LF2 picks up
+                // on the attack input, not by walking over it).
+                if (player.heldWeapon < 0 && player.alive() && atk && player.grounded()) {
+                    for (int i = 0; i < g_objects.SIZE; i++) {
+                        lf2::Object& o = g_objects.objs[i];
+                        if (o.active && o.weaponType > 0 && !o.held && !o.thrown &&
+                            fabsf(o.f.x - player.x) < 60.f &&
+                            fabsf(o.f.z - player.z) < 20.f) {
+                            o.held = true;
+                            player.heldWeapon  = i;
+                            player.heavyWeapon = (o.weaponType >= 2);
+                            // F.LF: picking up plays 115 (light) / 116 (heavy)
+                            player.f.setFrame(player.heavyWeapon ? lf2::fid::PICK_HEAVY
+                                                                 : lf2::fid::PICK_LIGHT);
+                            break;
+                        }
+                    }
+                }
+                // Position the held weapon at the holder's wpoint each tick; a
+                // throw frame (wpoint kind 3) or a knockdown drops it.
+                if (player.heldWeapon >= 0) {
+                    lf2::Object& w = g_objects.objs[player.heldWeapon];
+                    dat::Wpoint wp; int wk = fighterWpoint(player.f, wp);
+                    int pst = player.f.state();
+                    // wpoint kind 3 with a velocity = THROW it; knockdown = drop it.
+                    bool throwIt = (wk == 3) && (wp.dvx || wp.dvy || wp.dvz);
+                    bool dropIt  = !w.active || (wk == 3 && !throwIt) || !player.alive() ||
+                                   pst == lf2::ST_FALLING || pst == lf2::ST_LYING ||
+                                   pst == lf2::ST_INJURED;
+                    if (throwIt && w.active) {
+                        w.groundY = player.z;      // lands back on the player's floor line
+                        w.throwFrom(player.x, player.z, player.z, player.right,
+                                    (float)wp.dvx, (float)wp.dvy, (float)wp.dvz);
+                        player.heldWeapon = -1; player.heavyWeapon = false;
+                    } else if (dropIt) {
+                        if (w.active) w.restOnGround(player.x, player.z, player.z, player.right);
+                        player.heldWeapon = -1; player.heavyWeapon = false;
+                    } else if (wk == 1) {
+                        // F.LF weapon.act(): the weapon's OWN wpoint is made to
+                        // COINCIDE with the holder's wpoint — not its center. Set
+                        // the weaponact frame first, then offset the weapon so its
+                        // own wpoint lands on the holder's hand.
+                        w.f.facingRight = player.right;
+                        if (w.f.data && w.f.data->frame(wp.weaponact)) w.f.setFrame(wp.weaponact);
+                        float hx, hy; player.f.pointWorld(wp.x, wp.y, hx, hy);
+                        w.f.x = hx; w.f.y = hy; w.f.z = player.z;
+                        dat::Wpoint own;
+                        if (fighterWpoint(w.f, own)) {     // shift so own wpoint == hand
+                            float ox, oy; w.f.pointWorld(own.x, own.y, ox, oy);
+                            w.f.x += hx - ox; w.f.y += hy - oy;
+                        }
+                    }
+                }
+
+                // Heavy weapons (stones/boxes) are solid: push the player out.
+                for (int i = 0; i < g_objects.SIZE; i++) {
+                    lf2::Object& o = g_objects.objs[i];
+                    if (!o.active || !o.solid()) continue;
+                    if (fabsf(o.f.z - player.z) > 20.f) continue;
+                    float dx = player.x - o.f.x;
+                    const float RAD = 34.f;
+                    if (fabsf(dx) < RAD) {
+                        player.x = o.f.x + (dx >= 0.f ? RAD : -RAD);
+                        player.clampPos(); player.syncAnchor();
+                    }
+                }
+
                 // ── new player swing re-arms the enemies ─────────────────────
                 if (player.swingId != lastSwingId) {
                     for (int i = 0; i < NUM_ENEMIES; i++) slots[i].e.rehitTimer = 0;
@@ -455,6 +560,46 @@ int main(int, char*[]) {
                     }
                 }
 
+                // ── held weapon's itr → enemies ──────────────────────────────
+                // F.LF: a held weapon strikes through its itr KIND 5, and the real
+                // damage comes from <weapon_strength_list>[wpoint.attacking]
+                // (1 normal · 2 jump · 3 run · 4 dash), not from the itr itself.
+                if (player.heldWeapon >= 0) {
+                    lf2::Object& w = g_objects.objs[player.heldWeapon];
+                    dat::Wpoint hw; fighterWpoint(player.f, hw);
+                    HitInfo whi; bool swinging = false;
+                    if (w.active && hw.attacking > 0) {
+                        w.f.forEachItr([&](const lf2::WBox& wb, const dat::Itr& it) {
+                            if (it.kind != 5 || swinging) return;
+                            whi.box = toBox(wb);
+                            whi.injury = it.injury; whi.fall = it.fall;
+                            whi.dvx = it.dvx;
+                            whi.rest = it.vrest > 0 ? it.vrest : 9;   // weapon default
+                            whi.zwidth = it.zwidth > 0 ? it.zwidth : 15;
+                            swinging = true;
+                        });
+                        const dat::File* wd = w.f.data;
+                        if (swinging && wd && hw.attacking < 8 && wd->strength[hw.attacking].valid) {
+                            const dat::StrengthEntry& se = wd->strength[hw.attacking];
+                            whi.injury = se.injury; whi.fall = se.fall; whi.dvx = se.dvx;
+                            if (se.vrest > 0) whi.rest = se.vrest;
+                        }
+                    }
+                    if (swinging) {
+                        for (int i = 0; i < NUM_ENEMIES; i++) {
+                            Box ebody; Enemy& e = slots[i].e;
+                            if (e.rehitTimer == 0 && e.alive() &&
+                                fabsf(player.z - e.a.z) < (float)whi.zwidth &&
+                                fighterBody(e.a.f, ebody) && boxOverlap(whi.box, ebody)) {
+                                e.rehitTimer = whi.rest;
+                                e.hitFlash   = 10;
+                                float kb = (float)(whi.dvx > 0 ? whi.dvx : 4);
+                                e.a.hit(whi.injury, player.right ? kb : -kb, whi.fall);
+                            }
+                        }
+                    }
+                }
+
                 // ── enemy attacks → player ───────────────────────────────────
                 Box pBody;
                 bool havePBody = player.alive() && fighterBody(player.f, pBody);
@@ -475,7 +620,9 @@ int main(int, char*[]) {
 
                 // ── projectiles hit actors ───────────────────────────────────
                 g_objects.forEach([&](lf2::Object& o) {
-                    if (!o.flying() || o.rehit > 0) return;
+                    // Projectiles hit while in their flying state; a THROWN weapon
+                    // hits with its own itr while airborne.
+                    if (!(o.flying() || o.thrown) || o.rehit > 0) return;
                     HitInfo ohi;
                     if (!fighterAttack(o.f, ohi)) return;
                     if (o.team == 0) {                       // player's ball → enemies
