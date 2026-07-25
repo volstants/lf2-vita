@@ -1,3 +1,43 @@
+# LF2 Vita — Estado da sessão (2026-07-25c)
+
+## Sessão 2026-07-25c — Bugs de armas (reteste no device)
+
+Três bugs reportados no build de armas, todos corrigidos (host verde + compile-check):
+1. **Não dava para arremessar.** O gate era `wpoint kind 3`, mas dennis.dat só usa
+   **kind 1** (188×); o arremesso é sinalizado por um wpoint kind 1 **com velocidade**
+   (frames 47/51/54: dvx 19/9/16). Fix em main.cpp: `throwIt = wpoint tem dv != 0`.
+2. **Arma flutua em ataque de corrida/pulo.** Os frames jump_attack(80-82)/
+   run_attack(85-89) **não têm wpoint** → a arma solta e flutua. Fiel ao LF2:
+   atacar com arma na mão no ar/corrida/dash = **arremesso** (player.hpp
+   `throwHeldIfArmed()` em airborneTick/runTick → frame 45/50).
+3. **Portador empurrado pro lado oposto.** Única fonte de push é o bloco "solid"
+   (arma pesada no chão). `solid()` agora exclui armas **arremessadas** (`!thrown`)
+   além de seguradas; o loop pula `i==heldWeapon`; drop cai 40px à frente (> RAID 34).
+Testes novos em test_object.cpp (solid()!thrown; throw por velocidade do wpoint).
+
+---
+
+# LF2 Vita — Estado da sessão (2026-07-25b)
+
+## Sessão 2026-07-25b — Cenários data-driven (bg.dat)
+
+Parser `dat::parseBackground` + `renderBackground` data-driven, substituindo o
+Lion Forest hardcoded. Fonte: binário (`FUN_0040bff0` parse, `FUN_0041a250` draw).
+Achado-chave: `width:` da camada = **largura de parallax** (não da imagem);
+`screen_x = x - (width-794)*camX/(bgWidth-794)`. `loop:` = espaçamento de tiling
+(0 = desenha uma vez); `rect:` = fill sólido RGB565. O render antigo não tinha
+parallax e tileava o chão pela largura da imagem (causa dos "buracos" — o fix de
+color-key preto era paliativo; os PNGs de land já têm alpha, então honrar
+`transparency:0` do bg.dat dá o mesmo resultado, correto).
+`bg/sys/*/bg.dat` empacotados no VPK (glob no CMake); só `lf` ligado no código.
+Novo `tests/test_bg.cpp` (parser + math de parallax) — suíte host toda verde;
+compile-check do `main.cpp` OK (stubs SDL/psp2 recriados em outputs, +SDL_QueryTexture).
+Pendente device: conferir o visual do cenário (tufos espaçados por `loop`).
+TODO multi-stage: `MAP_W`/`Z_MIN`/`Z_MAX` runtime a partir de `bg.width`/`zboundary`;
+subdirs de assets por fase.
+
+---
+
 # LF2 Vita — Estado da sessão (2026-07-23)
 
 ## Sumário da sessão (contexto comprimido)

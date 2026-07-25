@@ -87,29 +87,57 @@ socos com combo · defesa com recuo · Falling Points · especiais (Quadrado +
 comando fiel) · projéteis (opoint → oid → spawn/voo/colisão) · MP · IA que
 persegue, ataca e usa especiais · menu 4×2 · roster de 8 (dennis, davis, woody,
 firen, freeze, rudolf, louis, henry) · render genérico (N folhas via header) ·
-cenário Lion Forest · HUD · **armas** (pegar 115/116, segurar por wpoint↔wpoint,
-golpear 20/25 via itr kind 5 + `weapon_strength_list`, arremessar 45/50, pedra sólida).
+**cenário data-driven** (parser de `bg.dat` + `renderBackground` com parallax
+por camada, `loop`/tiling, `rect` fill; Lion Forest ligado) · HUD · **armas**
+(pegar 115/116, segurar por wpoint↔wpoint, golpear 20/25 via itr kind 5 +
+`weapon_strength_list`, arremessar 45/50, pedra sólida).
 
-**PENDENTE DE TESTE NO DEVICE:** todo o sistema de armas (nunca foi testado na Vita).
+**Armas — reteste 2026-07-25c:** corrigidos 3 bugs (arremesso não disparava;
+arma flutuava em ataque de corrida/pulo; portador empurrado). **Chave:** o
+arremesso NÃO é `wpoint kind 3` (não existe nos dados — dennis só usa kind 1); é
+um wpoint kind 1 **com velocidade** (frames 47/51/54). Ataque armado no ar/corrida
+= arremesso (frames sem wpoint soltavam a arma). `solid()` só p/ arma pesada
+**parada no chão** (não segurada, não arremessada). AGUARDA RETESTE no device.
 
 **Não implementado:** códigos `next` 1000+ (LouisEX, teleporte do Woody) ·
 agarrão (cpoint) · Davis Leap Attack (D+^+J+A, 4 inputs) · custo de HP de alguns
-especiais · stages (só Lion Forest hardcoded; falta parser de `bg.dat` + `stage.dat`) ·
+especiais · `stage.dat` (waves/spawns/bosses — o `bg.dat` já é lido, falta a fase) ·
 DoP com frame longo (226) · `vrest` por atacante (hoje timer único) ·
 hitstop 3 · defesa por acúmulo de `bdefend` (hoje all-or-nothing).
 
-## 7. Fontes de referência (ordem de consulta)
+**Cenários (bg.dat) — feito nesta sessão:** `dat::parseBackground` (dat.hpp) lê
+`name/width/zboundary/perspective/shadow+shadowsize` e as camadas
+(`transparency/width/x/y/height/loop/rect/cc/c1/c2`), fiel ao binário
+`FUN_0040bff0` + draw `FUN_0041a250`. **Achado-chave:** o `width:` da camada é a
+**largura de parallax**, não a da imagem — `screen_x = x - (width-794)*camX/(bgWidth-794)`;
+camada com `width==bgWidth` acompanha a câmera 1:1 (chão), `width==794` fica fixa
+(fundo distante). O render antigo hardcoded não tinha parallax e tileava o chão
+pela largura da imagem em vez do `loop` (daí os "buracos"). `renderBackground`
+agora consome `Scene{Background + texturas por camada}`; `rect:` = fill RGB565.
+`bg/sys/*/bg.dat` empacotados no VPK; só `lf` ligado no código.
+**TODO multi-stage:** `MAP_W`/`Z_MIN`/`Z_MAX` ainda são `constexpr` (== Lion
+Forest); para trocar de fase em runtime, torná-los runtime a partir de
+`bg.width`/`zboundary`. Assets são flat em `assets/` (nomes colidem entre fases;
+subdirs por fase quando habilitar as outras). Teste: `tests/test_bg.cpp`.
 
-1. **`reference/F.LF/`** — clone do Project-F/F.LF (JS). **Fonte primária de mecânica.**
-   Clean room, legível, nomes semânticos. Ver `LF/global.js` (constantes),
-   `LF/character.js` (state machine), `LF/weapon.js`, `LF/livingobject.js`,
-   `LF/specialattack.js`, `LF/mechanics.js`.
-2. **`reference/decomp/lf2_decomp.c`** — decompilação PRÓPRIA do `lf2.exe` (611
-   funções, Ghidra). **Árbitro** quando as fontes divergem. Consultar por grep.
-3. Docs da comunidade (LF2 Fandom, lf-empire) — para o que nenhum código cobre.
-4. OpenLF2 (github.com/xsoameix/openlf2) — decompilação parcial, secundária.
+## 7. Fontes de referência (ORDEM OBRIGATÓRIA — decisão do usuário)
 
-**Regra:** F.LF para descobrir; binário para confirmar quando houver dúvida/conflito.
+1. **`reference/decomp/lf2_decomp.c`** — decompilação PRÓPRIA do `lf2.exe` (611
+   funções, Ghidra). **FONTE PRIMÁRIA. Sempre tentar aqui primeiro.**
+   É o binário original = a verdade. Consultar por grep/sed via bash.
+2. **`reference/F.LF/`** — Project-F/F.LF (JS, clean room). **Só quando não for
+   possível extrair do binário.** É reinterpretação: já divergiu do original
+   (dizia zwidth 12; o binário mostrou 15). Se usar, marcar no comentário do
+   código que a fonte foi o F.LF, não o binário.
+3. Docs da comunidade (LF2 Fandom, lf-empire) — último recurso.
+4. OpenLF2 — decompilação parcial de terceiro, secundária.
+
+**Regra:** binário primeiro, sempre. F.LF é fallback, não atalho. Quando as duas
+divergirem, o binário vence sem discussão.
+
+Custo assumido: extrair do binário é mais lento por achado (offsets crus). Isso é
+aceitável — o objetivo do projeto é fidelidade, não velocidade. O método da seção
+abaixo reduz bastante esse custo.
 
 ### Como ler o binário com fluência (método validado)
 As rotinas de I/O dos `.dat` no binário **nomeiam cada offset da struct**. Ex.:
@@ -155,9 +183,11 @@ padding `int3` (sem o filtro, inflava para 2180 com 1573 stubs `swi(3)`).
 
 ## 9. Próximos passos
 
-1. **Usuário: buildar e testar as armas** (nunca testadas no device) e commitar.
-2. **Stages:** parser de `bg.dat` → `renderBackground` data-driven (destrava as 9
-   fases; `bg/` completo já está no disco) + `stage.dat` (waves, spawns, bosses).
+1. **Usuário: buildar e testar as armas** (nunca testadas no device) + o **novo
+   cenário data-driven** (parallax, tufos de grama espaçados por `loop` sobre o
+   fill verde — deve bater com o LF2 original) e commitar.
+2. ✅ **bg.dat data-driven** (feito). Falta `stage.dat` (waves, spawns, bosses) e
+   tornar `MAP_W`/`Z_MIN`/`Z_MAX` runtime para habilitar as outras 8 fases.
 3. **Agarrão** (cpoint) e catch/throw.
 4. **Códigos `next` 1000+** via decomp (LouisEX, teleporte).
 5. Polish: DoP frame 226, hitstop 3, `vrest` por atacante, `bdefend` acumulado.
@@ -168,7 +198,7 @@ padding `int3` (sem o filtro, inflava para 2180 com 1573 stubs `swi(3)`).
 
 - Editar headers → `make -f Makefile.host test` + compile-check do `main.cpp` →
   só então pedir build ao usuário. Nunca mandar buildar sem validar no host.
-- Dúvida de mecânica: **F.LF primeiro**, binário para confirmar. Cruzar 2 fontes
-  antes de portar lógica.
+- Dúvida de mecânica: **binário decompilado primeiro** (seção 7). F.LF só se não
+  der para extrair do binário — e então marcar a origem no comentário do código.
 - Usuário pediu respostas **econômicas**: dizer o que ele deve fazer, sem narrar
   o que foi feito.

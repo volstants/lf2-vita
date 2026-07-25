@@ -25,6 +25,9 @@ $(BIN)/datdump: tools/datdump.cpp src/engine/dat.hpp | $(BIN)
 $(BIN)/test_dat: tests/test_dat.cpp src/engine/dat.hpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
+$(BIN)/test_bg: tests/test_bg.cpp src/engine/dat.hpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
 $(BIN)/test_fighter: tests/test_fighter.cpp src/engine/fighter.hpp src/engine/dat.hpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
@@ -40,8 +43,10 @@ $(BIN)/test_object: tests/test_object.cpp src/engine/object.hpp src/characters/p
                     src/engine/fighter.hpp src/engine/dat.hpp src/engine/types.hpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
-test: $(BIN)/test_dat $(BIN)/test_fighter $(BIN)/test_player $(BIN)/test_enemy $(BIN)/test_object
+test: $(BIN)/test_dat $(BIN)/test_bg $(BIN)/test_fighter $(BIN)/test_player $(BIN)/test_enemy $(BIN)/test_object
 	@./$(BIN)/test_dat
+	@echo ""
+	@./$(BIN)/test_bg
 	@echo ""
 	@./$(BIN)/test_fighter
 	@echo ""

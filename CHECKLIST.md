@@ -68,6 +68,10 @@ unifica tudo e destrava o roster.
 
 ## 6. Stages e roster
 
+- [x] `bg.dat` data-driven: parser (`dat::parseBackground`) + `renderBackground`
+      com parallax por camada, `loop`/tiling e `rect` fill (fiel ao binário).
+      `bg/sys/*/bg.dat` no VPK; Lion Forest ligado. Falta tornar `MAP_W`/z-bounds
+      runtime p/ habilitar as outras 8 fases.
 - [ ] `stage.dat`: fases, spawns, waves, bosses
 - [ ] Carregar qualquer personagem do `data.txt` como player e como inimigo
 

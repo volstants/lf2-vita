@@ -172,6 +172,44 @@ int main() {
         CHECK(!t.thrown && t.active,  "thrown weapon lands and rests on the ground");
     }
 
+    // ── Bug fixes: solid() gating + throw trigger by wpoint velocity ─────────
+    dat::File stone = dat::load("data/weapon1.dat");   // heavy (type 2)
+    if (!stone.frames.empty()) {
+        lf2::Object s;
+        s.spawn(&stone, 0, 1000.f, 365.f, 365.f, true, lf2::weapon_frame::HEAVY_ON_GROUND, 0);
+        s.weaponType = 2;
+        s.restOnGround(1000.f, 365.f, 365.f, true);
+        CHECK(s.solid(), "heavy weapon RESTING on the ground is solid (body-blocks)");
+        s.held = true;
+        CHECK(!s.solid(), "heavy weapon in hand is NOT solid (no self-shove)");
+        s.held = false; s.groundY = 500.f;
+        s.throwFrom(1000.f, 400.f, 400.f, true, 9.f, -4.f, 2.f);
+        CHECK(s.thrown && !s.solid(),
+              "thrown heavy weapon is NOT solid mid-flight (bug 1: holder shove)");
+    }
+
+    // Throw trigger is data-driven: the release is a HOLD wpoint (kind 1) that
+    // carries a velocity. Confirm dennis's throw frames expose exactly that, so
+    // main.cpp's velocity-based throw (not the non-existent kind 3) is correct.
+    {
+        dat::File dennis = dat::load("data/dennis.dat");
+        if (!dennis.frames.empty()) {
+            auto hasThrowWp = [](const dat::Frame* fr) {
+                if (!fr) return false;
+                for (const auto& w : fr->wpoints)
+                    if (w.kind == 1 && (w.dvx || w.dvy || w.dvz)) return true;
+                return false;
+            };
+            CHECK(hasThrowWp(dennis.frame(47)), "dennis 47 (light throw): kind-1 wpoint carries dvx");
+            CHECK(hasThrowWp(dennis.frame(51)), "dennis 51 (heavy throw): kind-1 wpoint carries dvx");
+            // And the hold/attack frames must NOT (they'd throw prematurely).
+            bool holdHasVel = false;
+            for (const auto& w : dennis.frame(0)->wpoints)
+                if (w.kind == 1 && (w.dvx || w.dvy || w.dvz)) holdHasVel = true;
+            CHECK(!holdHasVel, "dennis standing hold wpoint has no velocity (won't auto-throw)");
+        }
+    }
+
     if (g_fail) { std::printf("\n%d CHECK(S) FAILED\n", g_fail); return 1; }
     std::printf("\nall object tests passed\n");
     return 0;

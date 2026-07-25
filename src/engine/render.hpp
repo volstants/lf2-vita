@@ -19,24 +19,9 @@ inline SDL_Texture* loadTex(SDL_Renderer* r, const char* path, bool colorKey = t
     return t;
 }
 
-// ── Background helpers ────────────────────────────────────────────────────────
-inline void drawTiled(SDL_Renderer* r, SDL_Texture* t, int y, int tw, int th, int camX) {
-    if (!t) return;
-    for (int x = 0; x < MAP_W; x += tw) {
-        SDL_Rect d = { x - camX, y, tw, th };
-        if (d.x + tw < 0 || d.x > SCREEN_W) continue;
-        SDL_RenderCopy(r, t, nullptr, &d);
-    }
-}
-
-inline void drawOnce(SDL_Renderer* r, SDL_Texture* t,
-                     int mx, int y, int tw, int th, int camX)
-{
-    if (!t) return;
-    SDL_Rect d = { mx - camX, y, tw, th };
-    if (d.x + tw < 0 || d.x > SCREEN_W) return;
-    SDL_RenderCopy(r, t, nullptr, &d);
-}
+// ── Background layers are drawn data-driven in main.cpp (renderBackground),
+//    straight from bg.dat via dat::Background. The old fixed drawTiled/drawOnce
+//    helpers were removed with the hardcoded Lion Forest renderer.
 
 // ── Character sprite (from sheet grid) ───────────────────────────────────────
 inline void drawSprite(SDL_Renderer* r, SDL_Texture* t, int pic,

@@ -544,4 +544,116 @@ inline Index parseIndex(const std::string& text) {
 
 inline Index loadIndex(const char* path) { return parseIndex(loadText(path)); }
 
+// ── Background (bg.dat) ───────────────────────────────────────────────────────
+//  Parsed straight from the original bg.dat. Layout + semantics mirror the
+//  game's own loader (binary FUN_0040bff0 @ 0x40bff0) and draw routine
+//  (FUN_0041a250 @ 0x41a250):
+//
+//    name: <string>        scene name ('_' → ' ', exactly like the loader)
+//    width: <int>          total scene width in world px (camera scroll extent)
+//    zboundary: <t> <b>    walkable z band (near/far foot line)
+//    perspective: <a> <b>  (parsed, unused by this engine)
+//    shadow: <file> shadowsize: <w> <h>
+//
+//    layer: … layer_end     one block per parallax layer, IN DRAW ORDER (back→front)
+//      <file>               first token after "layer:" is the bitmap path
+//      transparency: <0|1>  1 = colour-key (black) the layer
+//      width: <int>         PARALLAX width — NOT the image width. Scroll speed is
+//                           (width-REF)/(bgWidth-REF): a layer whose width==bgWidth
+//                           tracks the camera 1:1 (foreground), width==REF (794)
+//                           stays fixed (far background). THIS is what the old
+//                           hardcoded renderer got wrong (it had no parallax).
+//      x: <int>  y: <int>   world position of the (first) copy
+//      height: <int>        rect layers only (image layers use natural height)
+//      loop: <int>          tile spacing in world px; 0 = draw the image once
+//      rect: <int>          solid-colour fill (RGB565) instead of a bitmap
+//      cc/c1/c2             colour-cycling animation (parsed, unused)
+struct BgLayer {
+    std::string file;
+    int  transparency = 0;
+    int  width = 0;      // parallax width (see note above)
+    int  x = 0, y = 0;
+    int  height = 0;
+    int  loop = 0;       // 0 = draw once, else tile every `loop` px
+    long rect = -1;      // -1 = bitmap layer; >=0 = RGB565 solid-fill colour
+    int  cc = 0, c1 = 0, c2 = 0;
+    bool isRect() const { return rect >= 0; }
+};
+
+struct Background {
+    std::string name;
+    int width = 0;              // total scene width (world px)
+    int zTop = 0, zBottom = 0;  // zboundary (near/far foot line)
+    int perspA = 0, perspB = 0; // parsed, unused
+    std::string shadow;
+    int shadowW = 0, shadowH = 0;
+    std::vector<BgLayer> layers;
+    bool ok = false;
+
+    // Screen-play width the original uses as the parallax denominator (0x31a).
+    static constexpr int PARALLAX_REF = 794;
+
+    // Screen-x of a layer for a given camera scroll (camX in world px). Faithful
+    // to FUN_0041a250: off = (layerWidth - REF) * camX / (bgWidth - REF).
+    int layerScreenX(const BgLayer& L, int camX) const {
+        if (width <= PARALLAX_REF) return L.x;           // no parallax on tiny scenes
+        long off = (long)(L.width - PARALLAX_REF) * camX / (long)(width - PARALLAX_REF);
+        return L.x - (int)off;
+    }
+};
+
+// Decode a bg.dat rect: field (RGB565) into 8-bit RGB. (Lion Forest's 4706 →
+// ~16,76,16 — the dark green the old renderer had hardcoded.)
+inline void rectColor(long v, int& r, int& g, int& b) {
+    r = (int)((v >> 11) & 0x1f) << 3;
+    g = (int)((v >> 5)  & 0x3f) << 2;
+    b = (int)( v        & 0x1f) << 3;
+}
+
+inline Background parseBackground(const std::string& text) {
+    using namespace detail;
+    Background bg;
+    Tok tk(text);
+    while (!tk.eof()) {
+        std::string t = tk.next();
+        if (t == "name:") {
+            bg.name = tk.restOfLine();
+            for (char& c : bg.name) if (c == '_') c = ' ';
+        }
+        else if (t == "width:")       { bg.width   = tk.nextInt(); }
+        else if (t == "zboundary:")   { bg.zTop    = tk.nextInt(); bg.zBottom = tk.nextInt(); }
+        else if (t == "perspective:") { bg.perspA  = tk.nextInt(); bg.perspB  = tk.nextInt(); }
+        else if (t == "shadow:") {
+            bg.shadow = tk.next();
+            std::string s = tk.next();                    // literal "shadowsize:"
+            if (s == "shadowsize:") { bg.shadowW = tk.nextInt(); bg.shadowH = tk.nextInt(); }
+        }
+        else if (t == "layer:") {
+            BgLayer L;
+            L.file = tk.next();                           // path on the next line
+            while (!tk.eof()) {
+                std::string k = tk.next();
+                if      (k == "layer_end")     break;
+                else if (k == "transparency:") L.transparency = tk.nextInt();
+                else if (k == "width:")        L.width  = tk.nextInt();
+                else if (k == "x:")            L.x      = tk.nextInt();
+                else if (k == "y:")            L.y      = tk.nextInt();
+                else if (k == "height:")       L.height = tk.nextInt();
+                else if (k == "loop:")         L.loop   = tk.nextInt();
+                else if (k == "rect:")         L.rect   = std::atol(tk.next().c_str());
+                else if (k == "rect32:")       L.rect   = std::atol(tk.next().c_str());
+                else if (k == "cc:")           L.cc     = tk.nextInt();
+                else if (k == "c1:")           L.c1     = tk.nextInt();
+                else if (k == "c2:")           L.c2     = tk.nextInt();
+                // stray tokens are skipped (matches the loader's ignore-unknown)
+            }
+            bg.layers.push_back(L);
+        }
+    }
+    bg.ok = bg.width > 0 && !bg.layers.empty();
+    return bg;
+}
+
+inline Background loadBackground(const char* path) { return parseBackground(loadText(path)); }
+
 } // namespace dat

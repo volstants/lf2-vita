@@ -38,8 +38,11 @@ vita_create_self(${PROJECT_NAME}.self ${PROJECT_NAME})
 # new assets. The .bmp originals are NOT packaged.
 file(GLOB VPK_PNGS  RELATIVE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/assets/*.png)
 file(GLOB VPK_DATS  RELATIVE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/data/*.dat)
+# bg.dat scene descriptors, parsed at runtime (dat::loadBackground). Preserve
+# the original bg/sys/<scene>/ path so multi-stage support is just more globs.
+file(GLOB VPK_BGS   RELATIVE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/bg/sys/*/bg.dat)
 set(VPK_FILES "")
-foreach(f ${VPK_PNGS} ${VPK_DATS} data/data.txt)
+foreach(f ${VPK_PNGS} ${VPK_DATS} ${VPK_BGS} data/data.txt)
   list(APPEND VPK_FILES FILE ${f} ${f})
 endforeach()
 

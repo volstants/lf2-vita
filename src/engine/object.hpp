@@ -114,8 +114,11 @@ struct Object {
         held = false;
     }
 
-    // Solid footprint: heavy weapons (stones, boxes) block movement in LF2.
-    bool solid() const { return weaponType >= 2 && !held; }
+    // Solid footprint: a heavy weapon (stone, box) blocks movement in LF2 only
+    // while RESTING on the ground — not in a hand, and not mid-flight after a
+    // throw (a thrown weapon is a projectile, so it must not body-block the
+    // thrower, which otherwise reads as "the holder gets shoved sideways").
+    bool solid() const { return weaponType >= 2 && !held && !thrown; }
 
     void tick() {
         if (!active) return;

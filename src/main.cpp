@@ -169,40 +169,69 @@ static InputState readInput(SDL_Joystick* joy) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Background (Lion Forest)
+//  Background — data-driven from bg.dat (dat::Background). Replaces the old
+//  hardcoded Lion Forest renderer, which had no parallax and tiled the ground
+//  by image width instead of the layer's `loop` spacing. See dat.hpp for the
+//  bg.dat semantics; the draw here mirrors the game's own FUN_0041a250.
 // ─────────────────────────────────────────────────────────────────────────────
-struct Textures {
-    SDL_Texture *forests = nullptr, *forestm1 = nullptr, *forestm2 = nullptr,
-                *forestm3 = nullptr, *forestm4 = nullptr, *foresett = nullptr,
-                *land1 = nullptr, *land2 = nullptr, *land4 = nullptr,
-                *shadow = nullptr;
-    void load(SDL_Renderer* r) {
-        forests  = loadTex(r, "app0:/assets/forests.png",  false);
-        forestm1 = loadTex(r, "app0:/assets/forestm1.png", true, 0, 0, 0);
-        forestm2 = loadTex(r, "app0:/assets/forestm2.png", true, 0, 0, 0);
-        forestm3 = loadTex(r, "app0:/assets/forestm3.png", true, 0, 0, 0);
-        forestm4 = loadTex(r, "app0:/assets/forestm4.png", true, 0, 0, 0);
-        foresett = loadTex(r, "app0:/assets/forestt.png",  true, 0, 0, 0);
-        land1    = loadTex(r, "app0:/assets/land1.png",    true, 0, 0, 0);
-        land2    = loadTex(r, "app0:/assets/land2.png",    false);
-        land4    = loadTex(r, "app0:/assets/land4.png",    true, 0, 0, 0);
-        shadow   = loadTex(r, "app0:/assets/s.png",        true, 0, 0, 0);
+struct Scene {
+    dat::Background bg;
+    std::vector<SDL_Texture*> layerTex;   // parallel to bg.layers; null for rect layers
+    SDL_Texture* shadow = nullptr;
+
+    void load(SDL_Renderer* r, const char* bgDatPath) {
+        bg = dat::loadBackground(bgDatPath);
+        layerTex.assign(bg.layers.size(), nullptr);
+        for (size_t i = 0; i < bg.layers.size(); ++i) {
+            const dat::BgLayer& L = bg.layers[i];
+            if (L.isRect()) continue;                       // solid fill: no bitmap
+            std::string png = sheetAsset(L.file);           // bg\sys\lf\x.bmp → app0:/assets/x.png
+            // transparency:1 → colour-key black (LF2 backgrounds key on black).
+            layerTex[i] = loadTex(r, png.c_str(), L.transparency != 0, 0, 0, 0);
+        }
+        if (!bg.shadow.empty())
+            shadow = loadTex(r, sheetAsset(bg.shadow).c_str(), true, 0, 0, 0);
     }
 };
 
-static void renderBackground(SDL_Renderer* r, const Textures& tx, int camX) {
-    SDL_SetRenderDrawColor(r, 111, 163, 218, 255);
+static void renderBackground(SDL_Renderer* r, const Scene& sc, int camX) {
+    SDL_SetRenderDrawColor(r, 111, 163, 218, 255);   // sky (not in bg.dat; port default)
     SDL_RenderClear(r);
-    drawTiled(r, tx.forests,   128, 800,  70, camX);
-    drawOnce (r, tx.forestm1,    0, 147, 800, 104, camX);
-    drawOnce (r, tx.forestm2,  800, 147, 300, 104, camX);
-    drawOnce (r, tx.forestm3,    0, 170, 284,  84, camX);
-    drawOnce (r, tx.forestm4, 1216, 155, 184,  87, camX);
-    drawTiled(r, tx.foresett,  199, 253, 162, camX);
-    fillRect(r, 0, 356, SCREEN_W, 172, 16, 77, 16);
-    drawTiled(r, tx.land1, 356, 175,  74, camX);
-    drawTiled(r, tx.land2, 385, 225,  89, camX);
-    drawTiled(r, tx.land4, 420, 206, 106, camX);
+    const dat::Background& bg = sc.bg;
+    for (size_t i = 0; i < bg.layers.size(); ++i) {
+        const dat::BgLayer& L = bg.layers[i];
+
+        // Rect layer: a fixed-screen solid fill (no parallax in the original).
+        // Widen to our 960px viewport so the ground covers the whole screen.
+        if (L.isRect()) {
+            int cr, cg, cb; dat::rectColor(L.rect, cr, cg, cb);
+            int w = L.width > 0 ? L.width : SCREEN_W;
+            if (L.x + w < SCREEN_W) w = SCREEN_W - L.x;
+            fillRect(r, L.x, L.y, w, L.height, (Uint8)cr, (Uint8)cg, (Uint8)cb);
+            continue;
+        }
+
+        SDL_Texture* t = sc.layerTex[i];
+        if (!t) continue;
+        int tw = 0, th = 0;
+        SDL_QueryTexture(t, nullptr, nullptr, &tw, &th);
+        int sx = bg.layerScreenX(L, camX);              // parallax-shifted screen x
+
+        if (L.loop > 0) {
+            // Tiled: copies at world x, x+loop, … < layer.width, all sharing the
+            // single (constant) parallax shift — exactly like FUN_0041a250.
+            for (int wx = L.x; wx < L.width; wx += L.loop) {
+                int dxs = sx + (wx - L.x);
+                if (dxs + tw < 0 || dxs > SCREEN_W) continue;
+                SDL_Rect d = { dxs, L.y, tw, th };
+                SDL_RenderCopy(r, t, nullptr, &d);
+            }
+        } else {
+            if (sx + tw < 0 || sx > SCREEN_W) continue;
+            SDL_Rect d = { sx, L.y, tw, th };
+            SDL_RenderCopy(r, t, nullptr, &d);
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -380,8 +409,8 @@ int main(int, char*[]) {
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
 
-    Textures tx;
-    tx.load(ren);
+    Scene scene;
+    scene.load(ren, "app0:/bg/sys/lf/bg.dat");   // Lion Forest (only stage wired so far)
     // Faces up-front (small): the select screen needs all of them.
     for (int i = 0; i < ROSTER_N; i++)
         g_chars[i].face = loadTex(ren,
@@ -488,9 +517,13 @@ int main(int, char*[]) {
                     lf2::Object& w = g_objects.objs[player.heldWeapon];
                     dat::Wpoint wp; int wk = fighterWpoint(player.f, wp);
                     int pst = player.f.state();
-                    // wpoint kind 3 with a velocity = THROW it; knockdown = drop it.
-                    bool throwIt = (wk == 3) && (wp.dvx || wp.dvy || wp.dvz);
-                    bool dropIt  = !w.active || (wk == 3 && !throwIt) || !player.alive() ||
+                    // THROW: LF2 signals the release with the HOLD wpoint (kind 1)
+                    // carrying a velocity — there is NO kind-3 in the character data
+                    // (dennis throw frames 47/51/54 are kind 1 with dvx). So a hold
+                    // wpoint with nonzero dv releases the weapon this tick. (The
+                    // old wk==3 gate never matched, so throwing was impossible.)
+                    bool throwIt = (wk == 1 || wk == 3) && (wp.dvx || wp.dvy || wp.dvz);
+                    bool dropIt  = !w.active || !player.alive() ||
                                    pst == lf2::ST_FALLING || pst == lf2::ST_LYING ||
                                    pst == lf2::ST_INJURED;
                     if (throwIt && w.active) {
@@ -499,7 +532,12 @@ int main(int, char*[]) {
                                     (float)wp.dvx, (float)wp.dvy, (float)wp.dvz);
                         player.heldWeapon = -1; player.heavyWeapon = false;
                     } else if (dropIt) {
-                        if (w.active) w.restOnGround(player.x, player.z, player.z, player.right);
+                        // Drop it slightly IN FRONT (beyond the solid radius) so a
+                        // heavy weapon doesn't rest under the holder and shove them.
+                        if (w.active) {
+                            float dropX = player.x + (player.right ? 40.f : -40.f);
+                            w.restOnGround(dropX, player.z, player.z, player.right);
+                        }
                         player.heldWeapon = -1; player.heavyWeapon = false;
                     } else if (wk == 1) {
                         // F.LF weapon.act(): the weapon's OWN wpoint is made to
@@ -518,8 +556,10 @@ int main(int, char*[]) {
                     }
                 }
 
-                // Heavy weapons (stones/boxes) are solid: push the player out.
+                // Heavy weapons (stones/boxes) resting on the ground are solid:
+                // push the player out. NEVER the weapon in your own hand.
                 for (int i = 0; i < g_objects.SIZE; i++) {
+                    if (i == player.heldWeapon) continue;
                     lf2::Object& o = g_objects.objs[i];
                     if (!o.active || !o.solid()) continue;
                     if (fabsf(o.f.z - player.z) > 20.f) continue;
@@ -670,20 +710,22 @@ int main(int, char*[]) {
             renderMenu(ren, menuCursor);
         } else {
             int camX = clampI((int)player.x - SCREEN_W / 2, 0, MAP_W - SCREEN_W);
-            renderBackground(ren, tx, camX);
+            renderBackground(ren, scene, camX);
 
-            // Shadows
-            if (tx.shadow) {
-                SDL_Rect ps = { (int)player.x - camX - 18, (int)player.z - 4, 37, 9 };
-                SDL_RenderCopy(ren, tx.shadow, nullptr, &ps);
+            // Shadows — size from bg.dat's shadowsize (Lion Forest: 37×9).
+            if (scene.shadow) {
+                const int shW = scene.bg.shadowW, shH = scene.bg.shadowH;
+                const int shOx = shW / 2;
+                SDL_Rect ps = { (int)player.x - camX - shOx, (int)player.z - shH/2, shW, shH };
+                SDL_RenderCopy(ren, scene.shadow, nullptr, &ps);
                 for (int i = 0; i < NUM_ENEMIES; i++) {
-                    SDL_Rect es = { (int)slots[i].e.a.x - camX - 18,
-                                    (int)slots[i].e.a.z - 4, 37, 9 };
-                    SDL_RenderCopy(ren, tx.shadow, nullptr, &es);
+                    SDL_Rect es = { (int)slots[i].e.a.x - camX - shOx,
+                                    (int)slots[i].e.a.z - shH/2, shW, shH };
+                    SDL_RenderCopy(ren, scene.shadow, nullptr, &es);
                 }
                 g_objects.forEach([&](lf2::Object& o) {
-                    SDL_Rect os = { (int)o.f.x - camX - 18, (int)o.f.z - 4, 37, 9 };
-                    SDL_RenderCopy(ren, tx.shadow, nullptr, &os);
+                    SDL_Rect os = { (int)o.f.x - camX - shOx, (int)o.f.z - shH/2, shW, shH };
+                    SDL_RenderCopy(ren, scene.shadow, nullptr, &os);
                 });
             }
 

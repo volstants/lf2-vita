@@ -33,6 +33,9 @@ namespace fid {
     constexpr int WEAPON_ATTACK  = 20, WEAPON_ATTACK2 = 25;
     constexpr int PICK_LIGHT     = 115, PICK_HEAVY    = 116;
     constexpr int THROW_LIGHT    = 45,  THROW_HEAVY   = 50;
+    // Carrying a HEAVY object: overhead two-hand stance (not the recessed hold).
+    constexpr int HEAVY_WALK = 12, HEAVY_WALK_LAST = 15;   // idle + walk (state 1)
+    constexpr int HEAVY_RUN  = 16, HEAVY_RUN_LAST  = 18;   // run (state 2)
     constexpr int PUNCH       = 60; // punch 1 (60-63)
     constexpr int PUNCH2      = 65; // punch 2 (65-68) — combo alternates 60/65
     constexpr int JUMP_ATTACK = 80; // 80-82 (state 3)
@@ -255,13 +258,20 @@ struct Player {
                     if (newL) { tapDir = -1; tapTimer = RUN_TAP_WINDOW; }
 
                     bool moving = L || R || U || D;
+                    // Carrying a heavy weapon → overhead two-hand stance (12-15),
+                    // never the normal recessed hold (0/5-8).
+                    bool heavy = heldWeapon >= 0 && heavyWeapon;
                     if (moving) {
                         if (L) x -= walkSpeed;
                         if (R) x += walkSpeed;
                         if (U) z -= walkSpeedZ;
                         if (D) z += walkSpeedZ;
                         clampPos();
-                        cycleAnim(fid::WALKING, fid::WALK_LAST, walkRate);  // 5→8 loop
+                        if (heavy) cycleAnim(fid::HEAVY_WALK, fid::HEAVY_WALK_LAST, walkRate);
+                        else       cycleAnim(fid::WALKING,     fid::WALK_LAST,      walkRate);
+                    } else if (heavy) {
+                        if (f.frameId < fid::HEAVY_WALK || f.frameId > fid::HEAVY_WALK_LAST)
+                            f.setFrame(fid::HEAVY_WALK);                    // hold overhead idle
                     } else {
                         if (s != ST_STANDING) f.setFrame(fid::STANDING);
                         f.advance();                                       // idle via next-graph
@@ -344,6 +354,18 @@ struct Player {
         comboNext = !comboNext;
         ++swingId;
     }
+
+    // Holding a weapon, an attack while airborne/running/dashing THROWS it. The
+    // bare-hand jump_attack (80-82) and run_attack (85-89) frames carry NO wpoint,
+    // so playing them detaches the weapon (it floats). Faithful to LF2: weapon in
+    // hand + attack = throw; the release impulse rides the throw frame's wpoint
+    // (dennis 47/51/54). Returns true if it consumed the attack.
+    bool throwHeldIfArmed() {
+        if (heldWeapon < 0) return false;
+        f.setFrame(heavyWeapon ? fid::THROW_HEAVY : fid::THROW_LIGHT);
+        ++swingId;
+        return true;
+    }
     bool inPunch() const { return f.frameId >= fid::PUNCH && f.frameId <= fid::PUNCH2 + 3; }
 
     // ── Airborne integration (jump + knockdown) ──────────────────────────────
@@ -372,8 +394,9 @@ struct Player {
         // Already mid air-attack (jump_attack = state 3, dash_attack = state 15):
         // let its frames play out.
         if (s == ST_ATTACK || s == ST_SPECIAL) { f.advance(); return; }
-        // Attack pressed in the air → jump attack, or dash attack from a dash.
+        // Attack pressed in the air → throw a held weapon, else jump/dash attack.
         if (atk) {
+            if (throwHeldIfArmed()) return;
             f.setFrame(s == ST_DASH ? fid::DASH_ATTACK : fid::JUMP_ATTACK);
             ++swingId;
             return;
@@ -394,6 +417,7 @@ struct Player {
     void runTick(bool L, bool R, bool U, bool D, bool atk, bool jmp) {
         if (trySpecial()) return;                                     // Square works mid-run
         if (atk) {                                                    // running attack (may cost MP)
+            if (throwHeldIfArmed()) return;                           // armed → running throw
             const dat::Frame* rf = f.data ? f.data->frame(fid::RUN_ATTACK) : nullptr;
             int cost = rf ? rf->mp : 0;
             if (cost > 0 && f.mp < cost) return;
@@ -407,7 +431,10 @@ struct Player {
         if (U) z -= runSpeedZ;
         if (D) z += runSpeedZ;
         clampPos();
-        cycleAnim(fid::RUNNING, fid::RUN_LAST, runRate);   // 9→11 loop
+        if (heldWeapon >= 0 && heavyWeapon)
+            cycleAnim(fid::HEAVY_RUN, fid::HEAVY_RUN_LAST, runRate);   // 16→18 loop
+        else
+            cycleAnim(fid::RUNNING, fid::RUN_LAST, runRate);           // 9→11 loop
     }
 
     // Cycle a contiguous frame range [first,last] at `rate` ticks per frame.
@@ -421,7 +448,10 @@ struct Player {
         }
     }
 
-    void enterRun() { f.setFrame(fid::RUNNING); animTimer = 0; tapTimer = 0; }
+    void enterRun() {
+        f.setFrame((heldWeapon >= 0 && heavyWeapon) ? fid::HEAVY_RUN : fid::RUNNING);
+        animTimer = 0; tapTimer = 0;
+    }
 
     // ── Sub-behaviours ───────────────────────────────────────────────────────
     // Launch only: sets the arc; gravity is integrated by the airborne branch of
