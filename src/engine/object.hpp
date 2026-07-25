@@ -104,6 +104,24 @@ struct Object {
         ttl = 30 * 12;
     }
 
+    // Released without a throw impulse: fall under gravity until it reaches the
+    // floor line, then rest. (restOnGround alone would freeze it mid-air — a
+    // weapon dropped while jumping/hit just hung there.)
+    void dropAt(float ax, float ay, float az, bool right, float floorY) {
+        f.facingRight = right;
+        f.x = ax; f.y = ay; f.z = az;
+        f.vx = 0.f; f.vy = 0.f; vz = 0.f;
+        groundY = floorY;
+        held = false;
+        if (ay >= floorY) { restOnGround(ax, floorY, az, right); return; }
+        int df = (weaponType >= 2) ? weapon_frame::IN_SKY : 40;
+        if (!(f.data && f.data->frame(df))) df = weapon_frame::IN_SKY;
+        f.setFrame(df);
+        thrown = true;                 // reuse the airborne path (gravity + landing)
+        rehit  = 0;
+        ttl    = 30 * 12;
+    }
+
     // A grounded weapon: rest at its on_ground frame (differs light vs heavy).
     void restOnGround(float ax, float ay, float az, bool right) {
         f.facingRight = right;

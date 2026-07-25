@@ -2,8 +2,14 @@
 #include <cmath>   // fabsf (separateX) — keeps this header SDL-free / host-buildable
 
 // ── Screen / Map ──────────────────────────────────────────────────────────────
-constexpr int   SCREEN_W   = 960;
+// LF2's native play area is 794 px wide: the bg.dat layers are authored to
+// cover exactly that (forestm1 @x0 + forestm2 @x800 tile to 794 under parallax).
+// Rendering a wider viewport leaves the sky/mountains short, so the world is
+// drawn in 794-wide logical space and SDL scales it to the Vita's 960×544.
+constexpr int   SCREEN_W   = 794;   // logical (LF2 native) — NOT the panel width
 constexpr int   SCREEN_H   = 544;
+constexpr int   WINDOW_W   = 960;   // physical Vita panel
+constexpr int   WINDOW_H   = 544;
 constexpr int   MAP_W      = 3200;
 constexpr int   NUM_ENEMIES = 3;
 

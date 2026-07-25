@@ -405,9 +405,11 @@ int main(int, char*[]) {
 
     SDL_Window*   win = SDL_CreateWindow("LF2 Vita v0.8.0",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        SCREEN_W, SCREEN_H, SDL_WINDOW_SHOWN);
+        WINDOW_W, WINDOW_H, SDL_WINDOW_SHOWN);
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    // Draw in LF2's native 794-wide space; SDL scales/letterboxes to the panel.
+    SDL_RenderSetLogicalSize(ren, SCREEN_W, SCREEN_H);
 
     Scene scene;
     scene.load(ren, "app0:/bg/sys/lf/bg.dat");   // Lion Forest (only stage wired so far)
@@ -536,7 +538,10 @@ int main(int, char*[]) {
                         // heavy weapon doesn't rest under the holder and shove them.
                         if (w.active) {
                             float dropX = player.x + (player.right ? 40.f : -40.f);
-                            w.restOnGround(dropX, player.z, player.z, player.right);
+                            // Drop from the holder's CURRENT height (z+h when in the
+                            // air) and let gravity land it on the floor line.
+                            w.dropAt(dropX, player.z + player.h, player.z,
+                                     player.right, player.z);
                         }
                         player.heldWeapon = -1; player.heavyWeapon = false;
                     } else if (wk == 1) {
@@ -558,10 +563,15 @@ int main(int, char*[]) {
 
                 // Heavy weapons (stones/boxes) resting on the ground are solid:
                 // push the player out. NEVER the weapon in your own hand.
+                // Jumping clears it: only block while the player is low enough to
+                // actually run into the object (h < 0 = airborne, more negative =
+                // higher). Without this a stone was an invisible wall in mid-air.
+                constexpr float SOLID_TOP = -30.f;   // clearance height
                 for (int i = 0; i < g_objects.SIZE; i++) {
                     if (i == player.heldWeapon) continue;
                     lf2::Object& o = g_objects.objs[i];
                     if (!o.active || !o.solid()) continue;
+                    if (player.h < SOLID_TOP) continue;          // jumped over it
                     if (fabsf(o.f.z - player.z) > 20.f) continue;
                     float dx = player.x - o.f.x;
                     const float RAD = 34.f;
@@ -729,32 +739,34 @@ int main(int, char*[]) {
                 });
             }
 
-            // Actors, painter's order by z
-            struct DrawRef { float z; int kind; int idx; };   // 0 player, 1 enemy
-            DrawRef list[NUM_ENEMIES + 1];
-            list[0] = { player.z, 0, 0 };
-            for (int i = 0; i < NUM_ENEMIES; i++) list[i + 1] = { slots[i].e.a.z, 1, i };
-            for (int i = 1; i < NUM_ENEMIES + 1; i++) {
+            // Actors AND objects, painter's order by z — weapons/projectiles must
+            // sort with the fighters, not blit on top of everyone.
+            struct DrawRef { float z; int kind; int idx; };   // 0 player, 1 enemy, 2 object
+            DrawRef list[NUM_ENEMIES + 1 + lf2::ObjectPool<24>::SIZE];
+            int nDraw = 0;
+            list[nDraw++] = { player.z, 0, 0 };
+            for (int i = 0; i < NUM_ENEMIES; i++) list[nDraw++] = { slots[i].e.a.z, 1, i };
+            for (int i = 0; i < g_objects.SIZE; i++)
+                if (g_objects.objs[i].active) list[nDraw++] = { g_objects.objs[i].f.z, 2, i };
+            for (int i = 1; i < nDraw; i++) {
                 DrawRef key = list[i]; int j = i - 1;
                 while (j >= 0 && list[j].z > key.z) { list[j + 1] = list[j]; j--; }
                 list[j + 1] = key;
             }
-            for (int i = 0; i < NUM_ENEMIES + 1; i++) {
+            for (int i = 0; i < nDraw; i++) {
                 if (list[i].kind == 0) {
                     drawFighter(ren, player.f, g_chars[playerIdx].sheets, camX);
-                } else {
+                } else if (list[i].kind == 1) {
                     EnemySlot& s = slots[list[i].idx];
                     bool flash = s.e.hitFlash > 0;
                     drawFighter(ren, s.e.a.f, g_chars[s.rosterIdx].sheets, camX,
                                 255, flash ? 80 : 255, flash ? 80 : 255);
+                } else {
+                    lf2::Object& o = g_objects.objs[list[i].idx];
+                    if (o.sheetSlot >= 0 && o.sheetSlot < (int)g_objBank.size())
+                        drawFighter(ren, o.f, g_objBank[o.sheetSlot].sheets, camX);
                 }
             }
-
-            // Projectiles on top
-            g_objects.forEach([&](lf2::Object& o) {
-                if (o.sheetSlot >= 0 && o.sheetSlot < (int)g_objBank.size())
-                    drawFighter(ren, o.f, g_objBank[o.sheetSlot].sheets, camX);
-            });
 
             renderHUD(ren, player, playerIdx, slots);
             if (gameSt == GameSt::GAMEOVER)
