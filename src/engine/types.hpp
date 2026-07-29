@@ -2,14 +2,12 @@
 #include <cmath>   // fabsf (separateX) — keeps this header SDL-free / host-buildable
 
 // ── Screen / Map ──────────────────────────────────────────────────────────────
-// LF2's native play area is 794 px wide: the bg.dat layers are authored to
-// cover exactly that (forestm1 @x0 + forestm2 @x800 tile to 794 under parallax).
-// Rendering a wider viewport leaves the sky/mountains short, so the world is
-// drawn in 794-wide logical space and SDL scales it to the Vita's 960×544.
-constexpr int   SCREEN_W   = 794;   // logical (LF2 native) — NOT the panel width
+// Native Vita panel. (Tried rendering in LF2's 794-wide logical space via
+// SDL_RenderSetLogicalSize so the bg.dat layers would cover exactly: it wrecked
+// the HUD/menu/camera layout on device. The viewport stays 960 and the
+// background tiles to fill it instead — see renderBackground.)
+constexpr int   SCREEN_W   = 960;
 constexpr int   SCREEN_H   = 544;
-constexpr int   WINDOW_W   = 960;   // physical Vita panel
-constexpr int   WINDOW_H   = 544;
 constexpr int   MAP_W      = 3200;
 constexpr int   NUM_ENEMIES = 3;
 
@@ -26,6 +24,17 @@ constexpr int   Z_MAX      = 505;
 constexpr float WALK_SPEED  = 5.0f;
 constexpr float WALK_SPEEDZ = 2.5f;
 constexpr float GRAVITY     = 1.7f;   // LF2's per-tick gravity (community-documented)
+// Gravity for a WEAPON in flight (thrown / opoint-launched arrows & shuriken).
+// CALIBRATED against F.LF running the same shot: Henry fires from x≈700 and the
+// arrow comes to rest at x≈275 (~425 px). With dvx 22 that's ~19 ticks, and
+// solving 22 = -3t + g·t²/2 gives g ≈ 0.45. (Full 1.7 lands it in ~7 ticks/130 px;
+// 0.25 overshot to ~660 px.) Note 1.7/4 ≈ 0.43 — the original likely steps object
+// physics on a coarser time unit. Revisit if the binary yields the real value.
+constexpr float WEAPON_FLY_GRAVITY = 0.45f;
+// Ground friction applied to a grounded fighter's vx each tick, and the speed
+// below which it snaps to zero (F.LF: ps.fric = 1, GC.min_speed = 1).
+constexpr float FRICTION  = 1.0f;
+constexpr float MIN_SPEED = 1.0f;
 constexpr float JUMP_VY     = -16.3f;   // from davis.js
 constexpr int   TICK_MS     = 33;   // 30 Hz logic — LF2's native tick. The frame
                                     // interpreter's wait/dv values assume it; at

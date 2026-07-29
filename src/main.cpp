@@ -67,19 +67,35 @@ static int objBankIndex(const ObjAssets* oa) {
     return -1;
 }
 
+// Cache lookup. A miss loads the .dat AND its sheets from disk — far too slow to
+// do inside the game loop (a special that fires an opoint would stall mid-swing,
+// and Rudolf's opoint oid 5 is rudolf.dat itself: 3 sheets of 800×560). Failures
+// are cached too: without that, an oid that can't load was re-read from disk on
+// every single call. Use preloadObjAssets() at startup so play never hits disk.
 static ObjAssets* objAssets(SDL_Renderer* r, int oid) {
-    for (auto& o : g_objBank) if (o.oid == oid) return &o;
+    for (auto& o : g_objBank)
+        if (o.oid == oid) return o.data.frames.empty() ? nullptr : &o;
     const dat::ObjectEntry* e = g_index.object(oid);
-    if (!e) return nullptr;
     ObjAssets oa; oa.oid = oid;
-    std::string path = e->file;                       // "data\dennis_ball.dat"
-    for (auto& c : path) if (c == '\\') c = '/';
-    oa.data = dat::load(("app0:/" + path).c_str());
-    if (oa.data.frames.empty()) return nullptr;
-    for (const auto& s : oa.data.header.files)
-        oa.sheets.push_back(loadTex(r, sheetAsset(s.path).c_str(), true, 0, 0, 0));
-    g_objBank.push_back(std::move(oa));
-    return &g_objBank.back();
+    if (e) {
+        std::string path = e->file;                   // "data\dennis_ball.dat"
+        for (auto& c : path) if (c == '\\') c = '/';
+        oa.data = dat::load(("app0:/" + path).c_str());
+        if (!oa.data.frames.empty())
+            for (const auto& s : oa.data.header.files)
+                oa.sheets.push_back(loadTex(r, sheetAsset(s.path).c_str(), true, 0, 0, 0));
+    }
+    g_objBank.push_back(std::move(oa));               // cache hits AND misses
+    ObjAssets* back = &g_objBank.back();
+    return back->data.frames.empty() ? nullptr : back;
+}
+
+// Warm the cache for every object a character can emit, so no spawn ever waits
+// on the filesystem. Called once per character at load time.
+static void preloadObjAssets(SDL_Renderer* r, const dat::File& d) {
+    for (const auto& fr : d.frames)
+        for (const auto& op : fr.opoints)
+            if (op.oid > 0) objAssets(r, op.oid);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -139,6 +155,35 @@ static bool fighterBody(const lf2::Fighter& f, Box& out) {
         if (!found) { out = toBox(wb); found = true; }
     });
     return found;
+}
+
+// An attack box also hurts WEAPONS. Each weapon has <weapon_hp>; at 0 it breaks
+// (F.LF weapon.js 'die'), which spawns the broken-weapon effect, oid 999.
+static void damageObjects(SDL_Renderer* r, const HitInfo& hi, bool fromRight, int skipIdx);
+
+// Obstacle test: does any grounded object present an itr of kind 14 (LF2's
+// "blocking" box) where the player's body now is? Only weapon1.dat (stone) ships
+// one, on its resting frame — knives and airborne/held weapons never block.
+// The test is x/y + a z band, so jumping clears it for free: in the air the
+// player's body box no longer overlaps the obstacle's ground-level box.
+template <int N>
+static bool blockedByObstacle(const lf2::Player& p, lf2::ObjectPool<N>& objs, int heldIdx) {
+    Box pb;
+    if (!fighterBody(p.f, pb)) return false;
+    bool blocked = false;
+    for (int i = 0; i < objs.SIZE; i++) {
+        if (i == heldIdx) continue;
+        lf2::Object& o = objs.objs[i];
+        if (!o.active || o.held || o.thrown) continue;
+        o.f.forEachItr([&](const lf2::WBox& wb, const dat::Itr& it) {
+            if (it.kind != 14 || blocked) return;
+            float zw = (float)(it.zwidth > 0 ? it.zwidth : 15);
+            if (fabsf(o.f.z - p.z) >= zw) return;
+            if (boxOverlap(toBox(wb), pb)) blocked = true;
+        });
+        if (blocked) break;
+    }
+    return blocked;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -215,20 +260,28 @@ static void renderBackground(SDL_Renderer* r, const Scene& sc, int camX) {
         if (!t) continue;
         int tw = 0, th = 0;
         SDL_QueryTexture(t, nullptr, nullptr, &tw, &th);
+        if (tw <= 0) continue;
         int sx = bg.layerScreenX(L, camX);              // parallax-shifted screen x
 
-        if (L.loop > 0) {
-            // Tiled: copies at world x, x+loop, … < layer.width, all sharing the
-            // single (constant) parallax shift — exactly like FUN_0041a250.
-            for (int wx = L.x; wx < L.width; wx += L.loop) {
-                int dxs = sx + (wx - L.x);
-                if (dxs + tw < 0 || dxs > SCREEN_W) continue;
-                SDL_Rect d = { dxs, L.y, tw, th };
-                SDL_RenderCopy(r, t, nullptr, &d);
-            }
-        } else {
-            if (sx + tw < 0 || sx > SCREEN_W) continue;
+        // Repeat rules. `loop > 0` = the data says tile (grass tufts, ground).
+        // For loop == 0 the original draws ONE copy; that leaves a gap on our
+        // 960-wide viewport (the layers are authored for LF2's 794). Only the
+        // near-static backdrop (parallax width ≈ the 794 reference, e.g. the sky)
+        // may repeat to fill — the mountain clumps (width 1100/1400) are single
+        // pieces and tiling them stamped a repeated ridge across the sky.
+        bool backdrop = (L.width <= dat::Background::PARALLAX_REF + 64);
+        int step = (L.loop > 0) ? L.loop : tw;
+        if (step <= 0) step = tw;
+        if (L.loop <= 0 && !backdrop) {                 // single piece
             SDL_Rect d = { sx, L.y, tw, th };
+            if (sx + tw > 0 && sx < SCREEN_W) SDL_RenderCopy(r, t, nullptr, &d);
+            continue;
+        }
+        int start = sx;
+        while (start > 0)        start -= step;         // first copy at/left of x=0
+        while (start + tw < 0)   start += step;
+        for (int dxs = start; dxs < SCREEN_W; dxs += step) {
+            SDL_Rect d = { dxs, L.y, tw, th };
             SDL_RenderCopy(r, t, nullptr, &d);
         }
     }
@@ -257,6 +310,49 @@ static void spawnOpoints(SDL_Renderer* r, const lf2::Fighter& f, int team) {
         float vx0 = faceRight ? (float)op.dvx : -(float)op.dvx;   // launch in facing dir
         o->spawn(&oa->data, objBankIndex(oa), wx, wy, f.z,
                  faceRight, op.action, team, vx0, (float)op.dvy);
+        // Several "projectiles" are actually WEAPON objects in data.txt: Henry's
+        // arrows (oid 201) and Rudolf's darts (oid 202) are type 1. Left at
+        // weaponType 0 they took the ball path — no gravity (a negative opoint
+        // dvy climbed forever) and the hit test (flying() || thrown) never
+        // matched their weapon frames, so they passed straight through. Tag them
+        // and mark them airborne: gravity arcs them and they can connect.
+        // (Only types 1/2 — type 3 is a real projectile/effect and must keep the
+        // straight-flight ball path.)
+        const dat::ObjectEntry* oe = g_index.object(op.oid);
+        int oty = oe ? oe->type : 0;
+        if (oty == 1 || oty == 2) {
+            o->weaponType = oty;
+            o->thrown     = true;
+            o->groundY    = f.z;       // floor line to land back on
+            o->ephemeral  = true;      // must expire after landing, or the pool
+                                       // fills with spent arrows and no special
+                                       // can spawn anything ever again
+        }
+    }
+}
+
+// Apply an attack box to every weapon lying around: durability comes from the
+// weapon's own <weapon_hp>, and at 0 it shatters into broken_weapon.dat (oid 999).
+static void damageObjects(SDL_Renderer* r, const HitInfo& hi, bool fromRight, int skipIdx) {
+    for (int i = 0; i < g_objects.SIZE; i++) {
+        if (i == skipIdx) continue;                 // never your own held weapon
+        lf2::Object& o = g_objects.objs[i];
+        if (!o.active || o.weaponType <= 0 || o.rehit > 0) continue;
+        bool hit = false;
+        o.f.forEachBdy([&](const lf2::WBox& wb, const dat::Bdy&) {
+            if (!hit && boxOverlap(hi.box, toBox(wb))) hit = true;
+        });
+        if (!hit) continue;
+        o.rehit = hi.rest > 0 ? hi.rest : 8;
+        if (!o.takeHit(hi.injury, fromRight)) continue;
+        // Broke: swap it for the shatter effect at the same spot.
+        float bx = o.f.x, by = o.f.y, bz = o.f.z;
+        bool  br = o.f.facingRight;
+        o.active = false;
+        if (ObjAssets* oa = objAssets(r, 999)) {
+            if (lf2::Object* fx = g_objects.alloc())
+                fx->spawn(&oa->data, objBankIndex(oa), bx, by, bz, br, 0, /*team=*/0);
+        }
     }
 }
 
@@ -266,35 +362,52 @@ static void spawnOpoints(SDL_Renderer* r, const lf2::Fighter& f, int team) {
 static void renderHUD(SDL_Renderer* r, const lf2::Player& player, int playerIdx,
                       EnemySlot slots[])
 {
-    constexpr int HUD_H   = 72;
-    constexpr int SLOTS   = NUM_ENEMIES + 1;
-    constexpr int SW_SLOT = SCREEN_W / SLOTS;
-    constexpr int PORT    = 56;
+    // LF2/F.LF layout: one light-blue band split into 4 panels per row, two rows
+    // (LF2 shows 8 fighter slots). Each panel = portrait on the left, then a red
+    // HP bar over a dark-red track and a blue MP bar over a dark-blue track.
+    // Unused slots stay as empty recessed tracks instead of disappearing.
+    constexpr int COLS    = 4;
+    constexpr int ROW_H   = 56;
+    constexpr int HUD_H   = ROW_H * 2;
+    constexpr int SW_SLOT = SCREEN_W / COLS;
+    constexpr int PORT    = 44;
     constexpr int BAR_X   = PORT + 8;
+    constexpr int BAR_W   = SW_SLOT - BAR_X - 10;
+    constexpr int BAR_H   = 12;
 
-    fillRect(r, 0, 0, SCREEN_W, HUD_H, 28, 56, 130);
-    fillRect(r, 0, HUD_H, SCREEN_W, 2, 10, 20, 70);
-    for (int i = 1; i < SLOTS; i++)
-        fillRect(r, i * SW_SLOT - 1, 2, 2, HUD_H - 4, 10, 20, 80);
+    fillRect(r, 0, 0, SCREEN_W, HUD_H, 92, 124, 190);          // panel
+    fillRect(r, 0, HUD_H, SCREEN_W, 2, 20, 34, 78);            // bottom edge
 
-    // Player: face portrait + HP (red) + MP (blue, now live).
-    fillRect(r, 2, 2, PORT, PORT, 18, 36, 90);
-    if (g_chars[playerIdx].face) {
-        SDL_Rect d = { 2, 2, PORT, PORT };
-        SDL_RenderCopy(r, g_chars[playerIdx].face, nullptr, &d);
+    // Panel separators + recessed empty tracks for every slot of both rows.
+    for (int row = 0; row < 2; row++) {
+        for (int c = 0; c < COLS; c++) {
+            int sx = c * SW_SLOT, sy = row * ROW_H;
+            if (c) fillRect(r, sx - 1, sy + 2, 2, ROW_H - 4, 60, 88, 150);
+            fillRect(r, sx + BAR_X - 1, sy + 13, BAR_W + 2, BAR_H + 2, 62, 90, 152);
+            fillRect(r, sx + BAR_X - 1, sy + 31, BAR_W + 2, BAR_H + 2, 62, 90, 152);
+        }
     }
-    drawHpBar(r, BAR_X, 12, player.hp(),  player.maxHp(), 210, 40,  40);
-    drawHpBar(r, BAR_X, 30, player.f.mp,  player.f.maxMp,  40, 110, 210);
 
-    for (int i = 0; i < NUM_ENEMIES; i++) {
-        int sx = (i + 1) * SW_SLOT;
-        fillRect(r, sx + 2, 2, PORT, PORT, 18, 36, 90);
-        SDL_Texture* face = g_chars[slots[i].rosterIdx].face;
-        if (face) { SDL_Rect d = { sx + 2, 2, PORT, PORT };
-                    SDL_RenderCopyEx(r, face, nullptr, &d, 0, nullptr, SDL_FLIP_HORIZONTAL); }
-        drawHpBar(r, sx + BAR_X, 12, slots[i].e.a.hp(), slots[i].e.a.maxHp(), 210, 40, 40);
-        drawHpBar(r, sx + BAR_X, 30, slots[i].e.a.f.mp, slots[i].e.a.f.maxMp,  40, 110, 210);
-    }
+    auto panel = [&](int slot, SDL_Texture* face, bool mirror,
+                     int hp, int maxHp, int mp, int maxMp)
+    {
+        int sx = (slot % COLS) * SW_SLOT, sy = (slot / COLS) * ROW_H;
+        fillRect(r, sx + 3, sy + 5, PORT + 2, PORT + 2, 20, 34, 78);   // portrait frame
+        if (face) {
+            SDL_Rect d = { sx + 4, sy + 6, PORT, PORT };
+            SDL_RenderCopyEx(r, face, nullptr, &d, 0, nullptr,
+                             mirror ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE);
+        }
+        drawHpBar(r, sx + BAR_X, sy + 14, hp, maxHp, 214, 36, 36, BAR_W, BAR_H);
+        drawHpBar(r, sx + BAR_X, sy + 32, mp, maxMp,  44, 96, 214, BAR_W, BAR_H);
+    };
+
+    panel(0, g_chars[playerIdx].face, false,
+          player.hp(), player.maxHp(), player.f.mp, player.f.maxMp);
+    for (int i = 0; i < NUM_ENEMIES; i++)
+        panel(i + 1, g_chars[slots[i].rosterIdx].face, true,
+              slots[i].e.a.hp(), slots[i].e.a.maxHp(),
+              slots[i].e.a.f.mp, slots[i].e.a.f.maxMp);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -339,6 +452,10 @@ static void resetGame(SDL_Renderer* r, lf2::Player& player, int playerIdx,
                       EnemySlot slots[], GameSt& gameSt)
 {
     g_chars[playerIdx].loadTextures(r, ROSTER[playerIdx]);
+    // Warm every projectile/weapon this fighter can emit BEFORE the match starts,
+    // so firing a special never blocks the loop on a .dat + spritesheet load.
+    preloadObjAssets(r, g_chars[playerIdx].data);
+    objAssets(r, 999);                                 // broken-weapon debris
     player = lf2::Player();
     player.load(&g_chars[playerIdx].data);
     player.x = 400.f;
@@ -351,6 +468,7 @@ static void resetGame(SDL_Renderer* r, lf2::Player& player, int playerIdx,
     for (int i = 0; i < NUM_ENEMIES; i++) {
         int idx = (playerIdx + 1 + i) % ROSTER_N;      // 3 different opponents
         g_chars[idx].loadTextures(r, ROSTER[idx]);
+        preloadObjAssets(r, g_chars[idx].data);        // enemies fire specials too
         slots[i] = EnemySlot();
         slots[i].rosterIdx = idx;
         slots[i].e.load(&g_chars[idx].data);
@@ -405,11 +523,9 @@ int main(int, char*[]) {
 
     SDL_Window*   win = SDL_CreateWindow("LF2 Vita v0.8.0",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        WINDOW_W, WINDOW_H, SDL_WINDOW_SHOWN);
+        SCREEN_W, SCREEN_H, SDL_WINDOW_SHOWN);
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
-    // Draw in LF2's native 794-wide space; SDL scales/letterboxes to the panel.
-    SDL_RenderSetLogicalSize(ren, SCREEN_W, SCREEN_H);
 
     Scene scene;
     scene.load(ren, "app0:/bg/sys/lf/bg.dat");   // Lion Forest (only stage wired so far)
@@ -473,6 +589,8 @@ int main(int, char*[]) {
                 }
             }
             else if (gameSt == GameSt::PLAYING) {
+                float prevX = player.x, prevZ = player.z;   // for the itr-14 block
+                int   prevState = player.f.state();         // pre-tick: run vs pickup
                 player.tick(raw.L, raw.R, raw.U, raw.D, atk, jmp, raw.def, raw.spc);
                 for (int i = 0; i < NUM_ENEMIES; i++)
                     slots[i].e.tick(player.x, player.z);
@@ -497,7 +615,14 @@ int main(int, char*[]) {
                 // frame offers a hold point (wpoint kind 1).
                 // Pick up: press ATTACK next to a grounded weapon (LF2 picks up
                 // on the attack input, not by walking over it).
-                if (player.heldWeapon < 0 && player.alive() && atk && player.grounded()) {
+                // Running/dashing into an object is a RUNNING ATTACK, not a
+                // pickup — the run branch already picked its attack frame, so
+                // grabbing here would cancel it.
+                // Tested on the PRE-tick state: by now the run branch has already
+                // swapped in the running-attack frame (state 3).
+                bool busyRunning = (prevState == lf2::ST_RUNNING || prevState == lf2::ST_DASH);
+                if (player.heldWeapon < 0 && player.alive() && atk &&
+                    player.grounded() && !busyRunning) {
                     for (int i = 0; i < g_objects.SIZE; i++) {
                         lf2::Object& o = g_objects.objs[i];
                         if (o.active && o.weaponType > 0 && !o.held && !o.thrown &&
@@ -525,7 +650,11 @@ int main(int, char*[]) {
                     // wpoint with nonzero dv releases the weapon this tick. (The
                     // old wk==3 gate never matched, so throwing was impossible.)
                     bool throwIt = (wk == 1 || wk == 3) && (wp.dvx || wp.dvy || wp.dvz);
-                    bool dropIt  = !w.active || !player.alive() ||
+                    // wk == 0: the current frame has NO hold point (jump_attack,
+                    // run_attack, injured…). There's nowhere to put the weapon, so
+                    // it must fall — leaving it held froze it in mid-air (tick()
+                    // early-returns while held), which read as "the weapon floats".
+                    bool dropIt  = !w.active || !player.alive() || wk == 0 ||
                                    pst == lf2::ST_FALLING || pst == lf2::ST_LYING ||
                                    pst == lf2::ST_INJURED;
                     if (throwIt && w.active) {
@@ -561,24 +690,20 @@ int main(int, char*[]) {
                     }
                 }
 
-                // Heavy weapons (stones/boxes) resting on the ground are solid:
-                // push the player out. NEVER the weapon in your own hand.
-                // Jumping clears it: only block while the player is low enough to
-                // actually run into the object (h < 0 = airborne, more negative =
-                // higher). Without this a stone was an invisible wall in mid-air.
-                constexpr float SOLID_TOP = -30.f;   // clearance height
-                for (int i = 0; i < g_objects.SIZE; i++) {
-                    if (i == player.heldWeapon) continue;
-                    lf2::Object& o = g_objects.objs[i];
-                    if (!o.active || !o.solid()) continue;
-                    if (player.h < SOLID_TOP) continue;          // jumped over it
-                    if (fabsf(o.f.z - player.z) > 20.f) continue;
-                    float dx = player.x - o.f.x;
-                    const float RAD = 34.f;
-                    if (fabsf(dx) < RAD) {
-                        player.x = o.f.x + (dx >= 0.f ? RAD : -RAD);
-                        player.clampPos(); player.syncAnchor();
-                    }
+                // Obstacles are DATA-DRIVEN, via itr kind 14: weapon1.dat (stone)
+                // carries one on its on_ground frame 20, weapon4.dat (knife) none —
+                // so only big objects at rest block, and only over that 16×18 box.
+                // F.LF (mechanics.blocking_xz) scales the blocked fighter's motion
+                // to 10% instead of displacing it; the old "solid" code snapped
+                // player.x by ±34 px per tick, which is what shoved the player when
+                // picking a stone up or throwing it.
+                // A big object STOPS you (F.LF only slows to 10%, but at 10% you
+                // still creep through the stone, which reads as walking inside it).
+                if (blockedByObstacle(player, g_objects, player.heldWeapon)) {
+                    player.x = prevX;
+                    player.z = prevZ;
+                    player.clampPos();
+                    player.syncAnchor();
                 }
 
                 // ── new player swing re-arms the enemies ─────────────────────
@@ -608,6 +733,9 @@ int main(int, char*[]) {
                             e.a.hit(hi.injury, player.right ? kb : -kb, hi.fall);
                         }
                     }
+                    // …and the same swing damages WEAPONS lying around: they have
+                    // <weapon_hp> durability (stone 800, knife 200) and break at 0.
+                    damageObjects(ren, hi, player.right, player.heldWeapon);
                 }
 
                 // ── held weapon's itr → enemies ──────────────────────────────
@@ -636,6 +764,7 @@ int main(int, char*[]) {
                         }
                     }
                     if (swinging) {
+                        damageObjects(ren, whi, player.right, player.heldWeapon);
                         for (int i = 0; i < NUM_ENEMIES; i++) {
                             Box ebody; Enemy& e = slots[i].e;
                             if (e.rehitTimer == 0 && e.alive() &&

@@ -274,6 +274,20 @@ int main() {
     p.f.setFrame(0);
     CHECK(p.f.sheetLocal(ord, loc) && ord == 0 && loc == 0, "pic 0 -> sheet 0 local 0");
 
+    // ── Ground friction kills leftover vx (F.LF ps.fric = 1) ─────────────────
+    // `dvx: 0` means KEEP, and full attack chains are dvx 0 (Rudolf's shuriken
+    // frames), so without friction a stale velocity slid the fighter for the
+    // whole animation.
+    {
+        lf2::Player q; q.load(&dennis);
+        q.f.setFrame(lf2::fid::STANDING, false);
+        q.f.vx = -8.f;                       // leftover knockback/run velocity
+        float x0 = q.x;
+        for (int i = 0; i < 12; ++i) q.tick(0,0,0,0, false,false);
+        CHECK(std::fabs(q.f.vx) < 0.01f, "ground friction zeroes leftover vx");
+        CHECK(q.x > x0 - 60.f, "fighter stops sliding instead of drifting away");
+    }
+
     if (g_fail) { std::printf("\n%d CHECK(S) FAILED\n", g_fail); return 1; }
     std::printf("\nall player tests passed\n");
     return 0;

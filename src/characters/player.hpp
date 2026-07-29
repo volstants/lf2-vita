@@ -107,6 +107,13 @@ struct Player {
     float walkSpeedZ = 2.5f;
     float runSpeed   = 10.5f;
     float runSpeedZ  = 1.65f;
+    // Carrying a heavy object slows you down — the .dat ships its own set
+    // (dennis: 3.7/1.85 walking, 6.2/1.0 running vs 5.0/2.5 and 10.5/1.65).
+    float heavyWalkSpeed  = 3.7f;
+    float heavyWalkSpeedZ = 1.85f;
+    float heavyRunSpeed   = 6.2f;
+    float heavyRunSpeedZ  = 1.0f;
+    bool  carryingHeavy() const { return heldWeapon >= 0 && heavyWeapon; }
     int   walkRate   = 3;      // ticks per walking frame
     int   runRate    = 3;      // ticks per running frame
     float jumpVy     = -16.3f;
@@ -121,6 +128,10 @@ struct Player {
         walkSpeedZ = d->header.get("walking_speedz",  2.5f);
         runSpeed   = d->header.get("running_speed",  10.5f);
         runSpeedZ  = d->header.get("running_speedz",  1.65f);
+        heavyWalkSpeed  = d->header.get("heavy_walking_speed",  3.7f);
+        heavyWalkSpeedZ = d->header.get("heavy_walking_speedz", 1.85f);
+        heavyRunSpeed   = d->header.get("heavy_running_speed",  6.2f);
+        heavyRunSpeedZ  = d->header.get("heavy_running_speedz", 1.0f);
         walkRate   = (int)d->header.get("walking_frame_rate", 3.f);
         runRate    = (int)d->header.get("running_frame_rate", 3.f);
         jumpVy     = d->header.get("jump_height",    -16.3f);
@@ -175,6 +186,17 @@ struct Player {
         if (fp > 0) { fpAcc += 45; while (fpAcc >= 100 && fp > 0) { fpAcc -= 100; --fp; } }
         if ((++mpRegenAcc & 1) == 0 && f.mp < f.maxMp) ++f.mp;   // ~15 MP/s regen
         if (f.removed) { f.removed = false; f.setFrame(fid::STANDING); }   // 1000-code safety
+
+        // GROUND FRICTION (F.LF mechanics.dynamics: ps.fric = 1 per tick while
+        // ps.y === 0, snapped to 0 below GC.min_speed = 1).
+        // Without it a leftover f.vx never died: `dvx: 0` means KEEP, and whole
+        // attack chains are dvx 0 (Rudolf's shuriken frames 62/66/69/288 are all
+        // 0), so any residual velocity — a knockback, the end of a run, a dash —
+        // kept sliding the fighter backwards for every frame of the attack.
+        if (grounded()) {
+            if (f.vx > 0.f) f.vx -= FRICTION; else if (f.vx < 0.f) f.vx += FRICTION;
+            if (f.vx > -MIN_SPEED && f.vx < MIN_SPEED) f.vx = 0.f;
+        }
 
         prevSpc = spc;
         bool newDef = def && !prevDef; prevDef = def;
@@ -238,14 +260,20 @@ struct Player {
             else if (def) { f.setFrame(fid::DEFEND); }   // raise guard (blocks move/atk)
             else if (atk && !atkConsumed) {                   // plain attack
                 if (heldWeapon >= 0) {
-                    // Holding a weapon: a held direction throws it, otherwise swing.
-                    if (L || R) f.setFrame(heavyWeapon ? fid::THROW_HEAVY : fid::THROW_LIGHT);
-                    else        f.setFrame((swingId & 1) ? fid::WEAPON_ATTACK2
-                                                        : fid::WEAPON_ATTACK);
+                    // A HEAVY object can only be thrown — there is no swing for it,
+                    // so plain Attack (no direction) hurls it the way you're facing.
+                    // A light weapon still swings, and throws only with a direction.
+                    if (heavyWeapon)   f.setFrame(fid::THROW_HEAVY);
+                    else if (L || R)   f.setFrame(fid::THROW_LIGHT);
+                    else               f.setFrame((swingId & 1) ? fid::WEAPON_ATTACK2
+                                                                : fid::WEAPON_ATTACK);
                     ++swingId;
                 } else throwPunch();
             }
-            else if (jmp && !jumpConsumed) { startJump(L || R); }
+            // Carrying a heavy object pins you to the ground in LF2 — no jumping.
+            else if (jmp && !jumpConsumed && !(heldWeapon >= 0 && heavyWeapon)) {
+                startJump(L || R);
+            }
             else {
                 comboNext = false;                       // idle → next attack starts fresh
                 comboQueued = false;
@@ -259,13 +287,16 @@ struct Player {
 
                     bool moving = L || R || U || D;
                     // Carrying a heavy weapon → overhead two-hand stance (12-15),
-                    // never the normal recessed hold (0/5-8).
-                    bool heavy = heldWeapon >= 0 && heavyWeapon;
+                    // never the normal recessed hold (0/5-8), and the .dat's
+                    // slower heavy_walking speeds.
+                    bool heavy = carryingHeavy();
+                    float wsp  = heavy ? heavyWalkSpeed  : walkSpeed;
+                    float wspz = heavy ? heavyWalkSpeedZ : walkSpeedZ;
                     if (moving) {
-                        if (L) x -= walkSpeed;
-                        if (R) x += walkSpeed;
-                        if (U) z -= walkSpeedZ;
-                        if (D) z += walkSpeedZ;
+                        if (L) x -= wsp;
+                        if (R) x += wsp;
+                        if (U) z -= wspz;
+                        if (D) z += wspz;
                         clampPos();
                         if (heavy) cycleAnim(fid::HEAVY_WALK, fid::HEAVY_WALK_LAST, walkRate);
                         else       cycleAnim(fid::WALKING,     fid::WALK_LAST,      walkRate);
@@ -424,14 +455,17 @@ struct Player {
             if (cost > 0) f.mp -= cost;
             f.setFrame(fid::RUN_ATTACK); ++swingId; return;
         }
-        if (jmp) { startDash();                            return; }  // running jump = dash
+        // running jump = dash (but a heavy object keeps you grounded)
+        if (jmp && !(heldWeapon >= 0 && heavyWeapon)) { startDash(); return; }
         bool keepDir = right ? (R && !L) : (L && !R);
         if (!keepDir) { f.setFrame(fid::STANDING); return; }
-        x += right ? runSpeed : -runSpeed;
-        if (U) z -= runSpeedZ;
-        if (D) z += runSpeedZ;
+        float rsp  = carryingHeavy() ? heavyRunSpeed  : runSpeed;
+        float rspz = carryingHeavy() ? heavyRunSpeedZ : runSpeedZ;
+        x += right ? rsp : -rsp;
+        if (U) z -= rspz;
+        if (D) z += rspz;
         clampPos();
-        if (heldWeapon >= 0 && heavyWeapon)
+        if (carryingHeavy())
             cycleAnim(fid::HEAVY_RUN, fid::HEAVY_RUN_LAST, runRate);   // 16→18 loop
         else
             cycleAnim(fid::RUNNING, fid::RUN_LAST, runRate);           // 9→11 loop

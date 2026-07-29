@@ -49,17 +49,23 @@ inline void drawSpriteAt(SDL_Renderer* r, SDL_Texture* t, int pic,
 }
 
 // ── HP bar ────────────────────────────────────────────────────────────────────
+// Width/height are passed in: a fixed 200 px bar overflowed the 240 px HUD slot
+// and bled into the next fighter's panel.
 inline void drawHpBar(SDL_Renderer* r, int bx, int by,
                       int hp, int maxHp,
-                      Uint8 cr, Uint8 cg, Uint8 cb)
+                      Uint8 cr, Uint8 cg, Uint8 cb,
+                      int bw = 200, int bh = 14)
 {
-    constexpr int BW = 200, BH = 14;
-    SDL_SetRenderDrawColor(r, 60, 60, 60, 255);
-    SDL_Rect bg = { bx, by, BW, BH };
+    if (bw <= 0) return;
+    // Track is a darkened shade of the bar's own colour (LF2/F.LF: spent HP shows
+    // as dark red behind the red bar, spent MP as dark blue).
+    SDL_SetRenderDrawColor(r, (Uint8)(cr / 4), (Uint8)(cg / 4), (Uint8)(cb / 4), 255);
+    SDL_Rect bg = { bx, by, bw, bh };
     SDL_RenderFillRect(r, &bg);
-    int fill = (maxHp > 0 && hp > 0) ? BW * hp / maxHp : 0;
+    if (maxHp <= 0 || hp <= 0) return;
+    int fill = hp >= maxHp ? bw : bw * hp / maxHp;
     SDL_SetRenderDrawColor(r, cr, cg, cb, 255);
-    SDL_Rect bar = { bx, by, fill, BH };
+    SDL_Rect bar = { bx, by, fill, bh };
     SDL_RenderFillRect(r, &bar);
 }
 

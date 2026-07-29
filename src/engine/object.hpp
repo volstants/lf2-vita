@@ -21,6 +21,15 @@ enum ObjState {
     OST_HIT          = 3002,   // hit by another ball
     OST_REBOUNDING   = 3003,
     OST_DISAPPEARING = 3004,
+    // 3005 = in flight but inert to other balls (no ball-vs-ball reaction). It
+    // still carries attack itrs: henry_wind.dat (Henry's AND Louis's wind, oid
+    // 204) flies entirely in 3005, so treating only 3000 as "flying" made the
+    // wind pass through everyone without ever connecting.
+    OST_FLYING_INERT = 3005,
+    // 9999 = pure decoration (broken_weapon.dat's shards, etc.dat). Its chain
+    // ends on `next: 999`, which loops back to the first frame — fine for a ball
+    // in flight, but an effect must play once and go, or the debris sits there.
+    OST_EFFECT       = 9999,
 };
 
 // Canonical ball frame ids.
@@ -35,8 +44,13 @@ namespace weapon_state {
     constexpr int LIGHT_ON_HAND   = 1001, HEAVY_ON_HAND   = 2001;
 }
 namespace weapon_frame {
-    constexpr int ON_GROUND       = 60;   // light: 60-64 (weapon4) · heavy: 20 (weapon1)
-    constexpr int HEAVY_ON_GROUND = 20;
+    // FINAL resting frames — light 64 (state 1004), heavy 20 (state 2004),
+    // per F.LF weapon.js. 60 is only the FIRST frame of the light landing chain
+    // (60→64, state 1003); resting there left the weapon in a mid-fall pose a few
+    // px off the floor, because tick() early-returns for a weapon at rest and the
+    // frame graph never walked to 64.
+    constexpr int ON_GROUND       = 64;   // light, on_ground (1004)
+    constexpr int HEAVY_ON_GROUND = 20;   // heavy, on_ground (2004)
     constexpr int IN_SKY          = 0;
 }
 
@@ -52,6 +66,9 @@ struct Object {
     bool  thrown = false;   // airborne after a throw: flies, hits, then lands
     float vz = 0.f;         // depth velocity (throws can drift in z)
     float groundY = 0.f;    // y of the floor line it should land on
+    int   loopGuard = -1;   // highest frame id seen, for one-shot effects
+    bool  ephemeral = false;// spawned by an opoint (arrow/shuriken): expires once
+                            // it has come to rest. Stage weapons are permanent.
 
     void spawn(const dat::File* d, int sheet, float ax, float ay, float az,
                bool facingRight, int action, int ownerTeam,
@@ -66,14 +83,33 @@ struct Object {
         // fly purely on the opoint's dvx — without this they'd stall in place).
         f.vx = vx0; f.vy = vy0;
         f.setFrame(action > 0 ? action : oid_frame::FLYING);
+        // Weapons carry their own durability: <weapon_hp> (stone 800, knife 200).
+        // Fighter::load only knows the character key "hp", so a weapon would
+        // otherwise start with the 500 default and never break on schedule.
+        float whp = d ? d->header.get("weapon_hp", 0.f) : 0.f;
+        if (whp > 0.f) f.maxHp = f.hp = (int)whp;
         sheetSlot = sheet;
         team   = ownerTeam;
         rehit  = 0;
         ttl    = 30 * 12;            // 12 s hard cap
         active = true;
+        // FULL reset — the pool reuses slots, and leaving these set made a slot
+        // that once held an arrow (weaponType 1) come back as smoke that still
+        // "was a weapon": the weapon branch of tick() returns before animating, so
+        // it froze on screen forever AND could be picked up and thrown.
+        weaponType = 0;
+        held       = false;
+        thrown     = false;
+        vz         = 0.f;
+        groundY    = az;
+        loopGuard  = -1;
+        ephemeral  = false;
     }
 
-    bool flying() const { return f.state() == OST_FLYING; }
+    bool flying() const {
+        int s = f.state();
+        return s == OST_FLYING || s == OST_FLYING_INERT;
+    }
 
     // Connected with someone. A ball plays its hit animation and stops; a thrown
     // weapon bounces back a little and keeps falling (F.LF: weapon.hit.vx = -3).
@@ -96,7 +132,11 @@ struct Object {
         f.x = ax + (right ? (weaponType >= 2 ? 48.f : 58.f) : -(weaponType >= 2 ? 48.f : 58.f));
         f.y = ay + (weaponType >= 2 ? -40.f : -15.f);
         f.z = az;
-        f.vx = right ? vx0 : -vx0; f.vy = vy0; vz = vz0;
+        // No depth drift on a throw: F.LF's weapon.drop() sets only vx/vy and
+        // forces ps.zz = 0. Feeding the wpoint's dvz (3 light / 2 heavy) in here
+        // made the weapon slide sideways as it fell.
+        (void)vz0;
+        f.vx = right ? vx0 : -vx0; f.vy = vy0; vz = 0.f;
         int tf = (weaponType >= 2) ? weapon_frame::IN_SKY : 40;
         if (!(f.data && f.data->frame(tf))) tf = weapon_frame::IN_SKY;
         f.setFrame(tf);
@@ -111,9 +151,10 @@ struct Object {
         f.facingRight = right;
         f.x = ax; f.y = ay; f.z = az;
         f.vx = 0.f; f.vy = 0.f; vz = 0.f;
-        groundY = floorY;
+        groundY = az;                  // floor line == depth
         held = false;
-        if (ay >= floorY) { restOnGround(ax, floorY, az, right); return; }
+        (void)floorY;
+        if (ay >= az) { restOnGround(ax, az, az, right); return; }
         int df = (weaponType >= 2) ? weapon_frame::IN_SKY : 40;
         if (!(f.data && f.data->frame(df))) df = weapon_frame::IN_SKY;
         f.setFrame(df);
@@ -132,33 +173,68 @@ struct Object {
         held = false;
     }
 
-    // Solid footprint: a heavy weapon (stone, box) blocks movement in LF2 only
-    // while RESTING on the ground — not in a hand, and not mid-flight after a
-    // throw (a thrown weapon is a projectile, so it must not body-block the
-    // thrower, which otherwise reads as "the holder gets shoved sideways").
-    bool solid() const { return weaponType >= 2 && !held && !thrown; }
+    // Struck by an attack. Weapons lose <weapon_hp> durability and break at 0
+    // (F.LF weapon.js 'die' → frame 1000 + broken effect + weapon_broken_sound).
+    // A hit also kicks the weapon: F.LF gives a heavy one soft_bounceup.vy = -2
+    // and a light one weapon.hit.vy, so it reacts instead of sitting there.
+    // Returns true when this hit broke it.
+    bool takeHit(int injury, bool fromRight) {
+        if (weaponType <= 0) return false;
+        f.hp -= (injury > 0 ? injury : 10);
+        f.vx  = fromRight ? -3.f : 3.f;
+        if (!held) {
+            f.vy   = (weaponType >= 2) ? -2.f : -3.f;   // soft bounce up
+            thrown = true;                              // rejoin the airborne path
+        }
+        return f.hp <= 0;
+    }
+
+    // NOTE: there is deliberately no solid()/body-block for weapons. LF2 lets
+    // fighters walk straight over a weapon lying on the ground; the only blocker
+    // in the engine is an itr of kind 14, which slows movement rather than
+    // displacing the fighter (F.LF mechanics.blocking_xz).
 
     void tick() {
         if (!active) return;
         if (held) return;                        // holder drives position + frame
         if (rehit > 0) --rehit;
         if (weaponType > 0) {
-            if (!thrown) return;                 // resting on the ground
+            if (!thrown) {
+                // At rest. A weapon that belongs to the stage stays put forever,
+                // but one fired from an opoint (Henry's arrows, Rudolf's shuriken)
+                // must expire: this branch returns before the ttl countdown, so
+                // every landed arrow used to sit in the pool permanently until the
+                // 24 slots were gone and specials stopped spawning anything.
+                if (ephemeral && --ttl <= 0) active = false;
+                return;
+            }
             // In flight: gravity, spin through the sky frames, land at groundY.
-            f.vy += GRAVITY;
+            f.vy += WEAPON_FLY_GRAVITY;
             f.x += f.vx; f.y += f.vy; f.z += vz;
             f.advance();
-            if (f.y >= groundY) {                // fell onto the ground
-                f.y = groundY;
+            // The floor line for a given depth IS z (that's where a fighter's feet
+            // are). Using the groundY captured at throw time left the weapon
+            // resting in mid-air — at head height — whenever the thrower's z had
+            // moved or the throw drifted in z (heavy throw carries dvz).
+            float floorY = f.z;
+            if (f.y >= floorY) {                 // fell onto the ground
+                f.y = floorY;
                 thrown = false;
-                restOnGround(f.x, groundY, f.z, f.facingRight);
+                restOnGround(f.x, floorY, f.z, f.facingRight);
             }
             if (f.x < -200.f || f.x > (float)MAP_W + 200.f) active = false;
             return;
         }
         f.x += f.vx;                             // projectile: dvx = flight speed
         f.y += f.vy;
+        int beforeId = f.frameId;
         f.advance();
+        // One-shot effects: the moment the chain wraps to an earlier frame the
+        // animation has played through, so retire it instead of looping forever.
+        if (f.state() == OST_EFFECT) {
+            if (loopGuard >= 0 && f.frameId < beforeId) { active = false; return; }
+            loopGuard = beforeId;
+        }
         if (f.removed || --ttl <= 0 ||
             f.x < -200.f || f.x > (float)MAP_W + 200.f)
             active = false;

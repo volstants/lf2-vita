@@ -172,20 +172,39 @@ int main() {
         CHECK(!t.thrown && t.active,  "thrown weapon lands and rests on the ground");
     }
 
-    // ── Bug fixes: solid() gating + throw trigger by wpoint velocity ─────────
+    // ── Heavy weapon: throw arc, no depth drift, rests at the final frame ────
     dat::File stone = dat::load("data/weapon1.dat");   // heavy (type 2)
     if (!stone.frames.empty()) {
         lf2::Object s;
         s.spawn(&stone, 0, 1000.f, 365.f, 365.f, true, lf2::weapon_frame::HEAVY_ON_GROUND, 0);
         s.weaponType = 2;
         s.restOnGround(1000.f, 365.f, 365.f, true);
-        CHECK(s.solid(), "heavy weapon RESTING on the ground is solid (body-blocks)");
-        s.held = true;
-        CHECK(!s.solid(), "heavy weapon in hand is NOT solid (no self-shove)");
-        s.held = false; s.groundY = 500.f;
-        s.throwFrom(1000.f, 400.f, 400.f, true, 9.f, -4.f, 2.f);
-        CHECK(s.thrown && !s.solid(),
-              "thrown heavy weapon is NOT solid mid-flight (bug 1: holder shove)");
+        CHECK(s.f.frameId == lf2::weapon_frame::HEAVY_ON_GROUND,
+              "heavy weapon rests on frame 20 (state 2004)");
+        // A throw must not drift in depth: F.LF weapon.drop() forces zz = 0, so a
+        // wpoint dvz of 2 must be ignored (it slid sideways while falling).
+        float z0 = 400.f;
+        s.throwFrom(1000.f, 400.f, z0, true, 9.f, -4.f, /*dvz=*/2.f);
+        int guard = 0;
+        while (s.thrown && guard++ < 300) s.tick();
+        CHECK(!s.thrown && s.active, "thrown heavy weapon lands and rests");
+        CHECK(std::fabs(s.f.z - z0) < 0.01f, "throw does not drift in z (F.LF zz = 0)");
+        CHECK(std::fabs(s.f.y - s.f.z) < 0.01f, "landed weapon sits on its own z floor line");
+
+        // Obstacle data: the stone blocks through an itr kind 14 on its resting
+        // frame; the knife has none (only big objects stop a fighter).
+        auto hasItr14 = [](const dat::Frame* fr) {
+            if (!fr) return false;
+            for (const auto& it : fr->itrs) if (it.kind == 14) return true;
+            return false;
+        };
+        CHECK(hasItr14(stone.frame(lf2::weapon_frame::HEAVY_ON_GROUND)),
+              "stone's on_ground frame carries the kind-14 blocking itr");
+        CHECK(!hasItr14(stone.frame(lf2::weapon_frame::IN_SKY)),
+              "stone in flight does NOT block");
+        if (!knife.frames.empty())
+            CHECK(!hasItr14(knife.frame(lf2::weapon_frame::ON_GROUND)),
+                  "light weapon never blocks movement");
     }
 
     // Throw trigger is data-driven: the release is a HOLD wpoint (kind 1) that
@@ -207,6 +226,108 @@ int main() {
             for (const auto& w : dennis.frame(0)->wpoints)
                 if (w.kind == 1 && (w.dvx || w.dvy || w.dvz)) holdHasVel = true;
             CHECK(!holdHasVel, "dennis standing hold wpoint has no velocity (won't auto-throw)");
+        }
+    }
+
+    // ── Durability: weapons take damage and break at <weapon_hp> ─────────────
+    if (!stone.frames.empty() && !knife.frames.empty()) {
+        lf2::Object s;
+        s.spawn(&stone, 0, 800.f, 365.f, 365.f, true, lf2::weapon_frame::HEAVY_ON_GROUND, 0);
+        s.weaponType = 2;
+        CHECK(s.f.maxHp == 800, "stone starts with its <weapon_hp> 800, not the 500 default");
+        CHECK(!s.takeHit(100, true), "100 damage does not break an 800 hp stone");
+        CHECK(s.f.hp == 700, "damage is subtracted from the weapon's hp");
+        CHECK(s.thrown && s.f.vy < 0.f, "a struck weapon bounces up (F.LF soft_bounceup)");
+        bool broke = false;
+        for (int i = 0; i < 20 && !broke; ++i) broke = s.takeHit(100, true);
+        CHECK(broke, "the stone eventually breaks once hp reaches 0");
+
+        lf2::Object k;
+        k.spawn(&knife, 0, 800.f, 365.f, 365.f, true, lf2::weapon_frame::ON_GROUND, 0);
+        k.weaponType = 1;
+        CHECK(k.f.maxHp == 200, "knife starts with <weapon_hp> 200 (weaker than the stone)");
+
+        // Projectiles are not weapons: they must never take durability damage.
+        lf2::Object b;
+        b.spawn(&ball, 0, 500.f, 300.f, 400.f, true, 0, 0);
+        CHECK(!b.takeHit(999, true), "a non-weapon object has no durability to lose");
+    }
+
+    // ── Wind (oid 204, Henry AND Louis): flies in state 3005, not 3000 ───────
+    {
+        dat::File wind = dat::load("data/henry_wind.dat");
+        if (!wind.frames.empty()) {
+            lf2::Object w;
+            w.spawn(&wind, 0, 500.f, 380.f, 400.f, true, 0, 0);
+            CHECK(w.f.state() == lf2::OST_FLYING_INERT, "wind's flying frame is state 3005");
+            CHECK(w.flying(), "state 3005 counts as flying (else it never collides)");
+            bool hasItr = false;
+            for (const auto& it : wind.frame(0)->itrs) if (it.kind == 0) hasItr = true;
+            CHECK(hasItr, "wind's flying frame carries an attack itr");
+            // Louis enters the same object through its louis_flying frame (53).
+            const dat::Frame* lf = wind.frame(53);
+            CHECK(lf && lf->state == lf2::OST_FLYING_INERT, "louis_flying (53) is 3005 too");
+        }
+    }
+
+    // ── Pool slots must not leak state between objects ───────────────────────
+    // A slot that held an arrow (weaponType 1, thrown) came back as smoke that
+    // still behaved like a weapon: frozen on screen and pickable/throwable.
+    {
+        dat::File wind = dat::load("data/henry_wind.dat");
+        if (!wind.frames.empty() && !knife.frames.empty()) {
+            lf2::Object slot;
+            slot.spawn(&knife, 0, 700.f, 360.f, 400.f, true, lf2::weapon_frame::IN_SKY, 0);
+            slot.weaponType = 1; slot.thrown = true; slot.vz = 3.f; slot.held = true;
+            slot.spawn(&wind, 0, 500.f, 380.f, 400.f, true, 60, 0);   // reused as smoke
+            CHECK(slot.weaponType == 0, "reused slot clears weaponType");
+            CHECK(!slot.thrown && !slot.held, "reused slot clears thrown/held");
+            CHECK(slot.vz == 0.f,            "reused slot clears vz");
+            int before = slot.f.frameId;
+            for (int i = 0; i < 4; ++i) slot.tick();
+            CHECK(slot.f.frameId != before || !slot.active,
+                  "smoke animates instead of freezing as a fake weapon");
+        }
+        // One-shot effect (broken debris, state 9999) retires instead of looping.
+        dat::File broken = dat::load("data/broken_weapon.dat");
+        if (!broken.frames.empty()) {
+            lf2::Object fx;
+            fx.spawn(&broken, 0, 600.f, 380.f, 400.f, true, 0, 0);
+            CHECK(fx.f.state() == lf2::OST_EFFECT, "broken debris is a state-9999 effect");
+            int guard = 0;
+            while (fx.active && guard++ < 200) fx.tick();
+            CHECK(!fx.active, "broken debris disappears after one pass (no leftover sprite)");
+        }
+    }
+
+    // ── Spent opoint weapons must free their pool slot ───────────────────────
+    // A landed weapon takes the `!thrown` early-return in tick(), which skips the
+    // ttl countdown. Arrows/shuriken therefore stayed forever, filled all 24 pool
+    // slots and every later special silently failed to spawn ("magias pararam").
+    {
+        dat::File arrow = dat::load("data/henry_arrow1.dat");
+        if (!arrow.frames.empty()) {
+            lf2::ObjectPool<24> pool;
+            int dropped = 0;
+            for (int shot = 0; shot < 60; ++shot) {
+                lf2::Object* o = pool.alloc();
+                if (!o) { ++dropped; }
+                else {
+                    o->spawn(&arrow, 0, 500.f, 378.f, 400.f, true, 40, 0);
+                    o->weaponType = 1; o->thrown = true;
+                    o->groundY = 400.f; o->ephemeral = true;
+                }
+                for (int t = 0; t < 20; ++t) pool.forEach([](lf2::Object& x){ x.tick(); });
+            }
+            CHECK(dropped == 0, "60 arrow shots never exhaust the object pool");
+
+            // A stage weapon (not from an opoint) must NOT expire.
+            lf2::Object stay;
+            stay.spawn(&arrow, 0, 700.f, 400.f, 400.f, true, lf2::weapon_frame::ON_GROUND, 0);
+            stay.weaponType = 1;
+            stay.restOnGround(700.f, 400.f, 400.f, true);
+            for (int t = 0; t < 30 * 20; ++t) stay.tick();
+            CHECK(stay.active, "a weapon placed in the stage never expires");
         }
     }
 
