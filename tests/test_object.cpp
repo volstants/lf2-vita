@@ -238,6 +238,9 @@ int main() {
         CHECK(!s.takeHit(100, true), "100 damage does not break an 800 hp stone");
         CHECK(s.f.hp == 700, "damage is subtracted from the weapon's hp");
         CHECK(s.thrown && s.f.vy < 0.f, "a struck weapon bounces up (F.LF soft_bounceup)");
+        // A struck HEAVY weapon hops in place: no horizontal kick, or it walks
+        // into the player and he ends up creeping through it.
+        CHECK(s.f.vx == 0.f, "a struck stone gets no sideways push (F.LF soft_bounceup is vy only)");
         bool broke = false;
         for (int i = 0; i < 20 && !broke; ++i) broke = s.takeHit(100, true);
         CHECK(broke, "the stone eventually breaks once hp reaches 0");
@@ -320,6 +323,22 @@ int main() {
                 for (int t = 0; t < 20; ++t) pool.forEach([](lf2::Object& x){ x.tick(); });
             }
             CHECK(dropped == 0, "60 arrow shots never exhaust the object pool");
+
+            // Rapid fire (a shot every 12 ticks) is the real failure case: with a
+            // 12 s expiry the 18th shot found the pool full and came out empty.
+            lf2::ObjectPool<48> fast;
+            int lost = 0;
+            for (int shot = 0; shot < 40; ++shot) {
+                lf2::Object* o = fast.alloc();
+                if (!o) { ++lost; }
+                else {
+                    o->spawn(&arrow, 0, 500.f, 378.f, 400.f, true, 40, 0);
+                    o->weaponType = 1; o->thrown = true;
+                    o->groundY = 400.f; o->ephemeral = true;
+                }
+                for (int t = 0; t < 12; ++t) fast.forEach([](lf2::Object& x){ x.tick(); });
+            }
+            CHECK(lost == 0, "40 rapid shots all spawn (spent arrows clear in ~3 s)");
 
             // A stage weapon (not from an opoint) must NOT expire.
             lf2::Object stay;

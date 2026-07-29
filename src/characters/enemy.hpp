@@ -32,6 +32,7 @@ struct Enemy {
                                  // toggled by Start in main.cpp
     bool hasHitPlayer = false;   // already landed on the player this swing?
     bool wasAttacking = false;
+    int  lastSwingId  = -1;      // mirrors a.swingId; a change means a new swing
     bool newSwing     = false;   // true only on the tick an attack starts
 
     void load(const dat::File* d) {
@@ -81,9 +82,13 @@ struct Enemy {
         }
         a.tick(L, R, U, D, atk, false, false, spc);
 
-        bool atkNow = (a.state() == lf2::ST_ATTACK);
-        newSwing    = atkNow && !wasAttacking;
-        wasAttacking = atkNow;
+        // A new swing is signalled by the actor's swingId, NOT by entering
+        // ST_ATTACK: specials run in ST_SPECIAL (15), so keying off state 3 meant
+        // hasHitPlayer was never cleared between specials — the first one landed
+        // and every one after it passed through the player doing nothing.
+        newSwing     = (a.swingId != lastSwingId);
+        lastSwingId  = a.swingId;
+        wasAttacking = (a.state() == lf2::ST_ATTACK);
         if (newSwing) hasHitPlayer = false;
     }
 };

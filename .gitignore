@@ -33,3 +33,6 @@ bin/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# host SDL2 headers for compile-checking (tools/host_sdl.sh)
+.sdlhost/

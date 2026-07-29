@@ -1,8 +1,12 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
+#ifndef LF2_HOST
 #include <psp2/kernel/processmgr.h>
+#endif
 #include <cmath>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 #include <deque>
@@ -24,13 +28,22 @@ static const char* ROSTER[] = { "dennis", "davis", "woody", "firen",
                                 "freeze", "rudolf", "louis", "henry" };
 constexpr int ROSTER_N = 8;
 
-// "sprite\sys\dennis_0.bmp" → "app0:/assets/dennis_0.png"
+// Where packaged files live. On the Vita everything is under app0:/; a host
+// build (LF2_HOST) runs straight out of the repo, which is what lets the whole
+// game loop be exercised headless with SDL_VIDEODRIVER=dummy.
+#ifdef LF2_HOST
+static const std::string APP = "";
+#else
+static const std::string APP = "app0:/";
+#endif
+
+// "sprite\sys\dennis_0.bmp" → "<APP>assets/dennis_0.png"
 static std::string sheetAsset(const std::string& datPath) {
     size_t slash = datPath.find_last_of("\\/");
     std::string base = (slash == std::string::npos) ? datPath : datPath.substr(slash + 1);
     size_t dot = base.find_last_of('.');
     if (dot != std::string::npos) base = base.substr(0, dot);
-    return "app0:/assets/" + base + ".png";
+    return APP + "assets/" + base + ".png";
 }
 
 struct CharAssets {
@@ -44,7 +57,7 @@ struct CharAssets {
         sheets.clear();
         for (const auto& s : data.header.files)
             sheets.push_back(loadTex(r, sheetAsset(s.path).c_str(), true, 0, 0, 0));
-        face = loadTex(r, (std::string("app0:/assets/") + name + "_f.png").c_str(), false);
+        face = loadTex(r, (APP + "assets/" + name + "_f.png").c_str(), false);
         texLoaded = true;
     }
 };
@@ -80,7 +93,7 @@ static ObjAssets* objAssets(SDL_Renderer* r, int oid) {
     if (e) {
         std::string path = e->file;                   // "data\dennis_ball.dat"
         for (auto& c : path) if (c == '\\') c = '/';
-        oa.data = dat::load(("app0:/" + path).c_str());
+        oa.data = dat::load((APP + path).c_str());
         if (!oa.data.frames.empty())
             for (const auto& s : oa.data.header.files)
                 oa.sheets.push_back(loadTex(r, sheetAsset(s.path).c_str(), true, 0, 0, 0));
@@ -88,6 +101,15 @@ static ObjAssets* objAssets(SDL_Renderer* r, int oid) {
     g_objBank.push_back(std::move(oa));               // cache hits AND misses
     ObjAssets* back = &g_objBank.back();
     return back->data.frames.empty() ? nullptr : back;
+}
+
+// Cache-only lookup: no renderer, no disk. This is what the tick loop uses, so
+// simulation never needs a live SDL_Renderer (and never stalls on I/O). Anything
+// it could need was warmed by preloadObjAssets() at match start.
+static ObjAssets* objAssetsCached(int oid) {
+    for (auto& o : g_objBank)
+        if (o.oid == oid) return o.data.frames.empty() ? nullptr : &o;
+    return nullptr;
 }
 
 // Warm the cache for every object a character can emit, so no spawn ever waits
@@ -159,7 +181,7 @@ static bool fighterBody(const lf2::Fighter& f, Box& out) {
 
 // An attack box also hurts WEAPONS. Each weapon has <weapon_hp>; at 0 it breaks
 // (F.LF weapon.js 'die'), which spawns the broken-weapon effect, oid 999.
-static void damageObjects(SDL_Renderer* r, const HitInfo& hi, bool fromRight, int skipIdx);
+static void damageObjects(const HitInfo& hi, bool fromRight, int skipIdx);
 
 // Obstacle test: does any grounded object present an itr of kind 14 (LF2's
 // "blocking" box) where the player's body now is? Only weapon1.dat (stone) ships
@@ -174,7 +196,11 @@ static bool blockedByObstacle(const lf2::Player& p, lf2::ObjectPool<N>& objs, in
     for (int i = 0; i < objs.SIZE; i++) {
         if (i == heldIdx) continue;
         lf2::Object& o = objs.objs[i];
-        if (!o.active || o.held || o.thrown) continue;
+        // Only a held weapon is exempt. Airborne ones need no special case: the
+        // kind-14 box lives on the on_ground frame, so a stone in flight has none.
+        // Skipping `thrown` objects meant a stone that was merely knocked into a
+        // hop stopped blocking, and the player walked straight through it.
+        if (!o.active || o.held) continue;
         o.f.forEachItr([&](const lf2::WBox& wb, const dat::Itr& it) {
             if (it.kind != 14 || blocked) return;
             float zw = (float)(it.zwidth > 0 ? it.zwidth : 15);
@@ -189,9 +215,49 @@ static bool blockedByObstacle(const lf2::Player& p, lf2::ObjectPool<N>& objs, in
 // ─────────────────────────────────────────────────────────────────────────────
 //  Input
 // ─────────────────────────────────────────────────────────────────────────────
-struct InputState { bool L, R, U, D, atk, jmp, def, spc, start, any; };
+struct InputState { bool L, R, U, D, atk, jmp, def, spc, start, sel, any; };
+
+#ifdef LF2_HEADLESS
+// ── Scripted input for the headless harness ──────────────────────────────────
+// No joystick exists under SDL_VIDEODRIVER=dummy, so the harness drives the
+// same tick loop the device runs. The script is deliberately dumb: it mashes
+// attack/special while walking, which is exactly the pattern that exposed the
+// object-pool exhaustion and the frozen-slot bugs on device.
+static long g_tickNo = 0;
+static long g_headlessTicks = 30 * 60;   // 60 s of simulated play by default
+static int  g_peakObjects   = 0;         // high-water mark of the object pool
+static long g_poolFullTicks = 0;         // ticks spent with every slot taken
+static long g_playTicks     = 0;         // ticks actually inside a match
+static int  g_headlessChar  = 0;         // roster index the harness plays
+static long g_spawnDrops    = 0;         // opoints that found the pool full
+static long g_spawnTotal    = 0;         // opoints that produced an object
+static long g_resets        = 0;         // matches restarted (clears the pool)
+static long g_damageDealt   = 0;         // total HP removed from the enemies
+static InputState scriptedInput() {
+    InputState in{};
+    long t = g_tickNo;
+    if (t < 4)          in.start = true;              // pick the fighter, start
+    else if (t == 6)     in.sel   = true;              // AUDIT MODE on
+    else {
+        long c = t % 60;
+        in.R   = c < 20;                              // walk in, walk out
+        in.L   = c >= 40;
+        // Hold Square a few ticks: a 1-tick tap lands mid-punch and is eaten,
+        // so the special (and its opoint) would never fire.
+        in.spc = (c >= 20 && c < 24) || (c >= 44 && c < 48);
+        in.atk = (c == 30 || c == 34);
+        in.jmp = (c == 50);
+    }
+    in.any = in.atk || in.jmp || in.def || in.spc || in.L || in.R || in.U || in.D;
+    return in;
+}
+#endif
 
 static InputState readInput(SDL_Joystick* joy) {
+#ifdef LF2_HEADLESS
+    (void)joy;
+    return scriptedInput();
+#endif
     InputState in{};
     if (!joy) return in;
     Sint16 ax = SDL_JoystickGetAxis(joy, 0);
@@ -209,6 +275,7 @@ static InputState readInput(SDL_Joystick* joy) {
     in.def = SDL_JoystickGetButton(joy, BTN_DEFEND);
     in.spc   = SDL_JoystickGetButton(joy, BTN_SPECIAL);
     in.start = SDL_JoystickGetButton(joy, BTN_START);
+    in.sel   = SDL_JoystickGetButton(joy, BTN_SELECT);
     in.any = in.atk || in.jmp || in.def || in.spc || in.L || in.R || in.U || in.D;
     return in;
 }
@@ -290,20 +357,34 @@ static void renderBackground(SDL_Renderer* r, const Scene& sc, int camX) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  Game state
 // ─────────────────────────────────────────────────────────────────────────────
-static lf2::ObjectPool<24> g_objects;
+// 48, not 24: Rudolf throws 4 shuriken per swing and Henry can keep several
+// arrows in the air plus the ones still lying on the ground, and a full pool
+// silently drops new spawns (the attack animates with nothing coming out).
+static lf2::ObjectPool<48> g_objects;
 
 struct EnemySlot { Enemy e; int rosterIdx = 3; int prevFrame = -1; };
 
 // Spawn every kind-1 opoint of the frame the fighter JUST entered.
-static void spawnOpoints(SDL_Renderer* r, const lf2::Fighter& f, int team) {
+static void spawnOpoints(const lf2::Fighter& f, int team) {
     const dat::Frame* fr = f.cur();
     if (!fr || fr->opoints.empty()) return;
     for (const dat::Opoint& op : fr->opoints) {
         if (op.kind != 1) continue;
-        ObjAssets* oa = objAssets(r, op.oid);
+        ObjAssets* oa = objAssetsCached(op.oid);
         if (!oa) continue;
         lf2::Object* o = g_objects.alloc();
-        if (!o) continue;
+        if (!o) {
+#ifdef LF2_HEADLESS
+            // THE symptom: a special animates but emits nothing. Counting this
+            // directly beats watching the pool high-water mark, which only goes
+            // full in the worst case and hides a slow leak.
+            ++g_spawnDrops;
+#endif
+            continue;
+        }
+#ifdef LF2_HEADLESS
+        ++g_spawnTotal;
+#endif
         float wx, wy;
         f.pointWorld(op.x, op.y, wx, wy);
         bool faceRight = (op.facing == 1) ? !f.facingRight : f.facingRight;
@@ -333,7 +414,7 @@ static void spawnOpoints(SDL_Renderer* r, const lf2::Fighter& f, int team) {
 
 // Apply an attack box to every weapon lying around: durability comes from the
 // weapon's own <weapon_hp>, and at 0 it shatters into broken_weapon.dat (oid 999).
-static void damageObjects(SDL_Renderer* r, const HitInfo& hi, bool fromRight, int skipIdx) {
+static void damageObjects(const HitInfo& hi, bool fromRight, int skipIdx) {
     for (int i = 0; i < g_objects.SIZE; i++) {
         if (i == skipIdx) continue;                 // never your own held weapon
         lf2::Object& o = g_objects.objs[i];
@@ -349,7 +430,7 @@ static void damageObjects(SDL_Renderer* r, const HitInfo& hi, bool fromRight, in
         float bx = o.f.x, by = o.f.y, bz = o.f.z;
         bool  br = o.f.facingRight;
         o.active = false;
-        if (ObjAssets* oa = objAssets(r, 999)) {
+        if (ObjAssets* oa = objAssetsCached(999)) {
             if (lf2::Object* fx = g_objects.alloc())
                 fx->spawn(&oa->data, objBankIndex(oa), bx, by, bz, br, 0, /*team=*/0);
         }
@@ -360,7 +441,7 @@ static void damageObjects(SDL_Renderer* r, const HitInfo& hi, bool fromRight, in
 //  HUD
 // ─────────────────────────────────────────────────────────────────────────────
 static void renderHUD(SDL_Renderer* r, const lf2::Player& player, int playerIdx,
-                      EnemySlot slots[])
+                      EnemySlot slots[], bool auditMode = false)
 {
     // LF2/F.LF layout: one light-blue band split into 4 panels per row, two rows
     // (LF2 shows 8 fighter slots). Each panel = portrait on the left, then a red
@@ -401,6 +482,10 @@ static void renderHUD(SDL_Renderer* r, const lf2::Player& player, int playerIdx,
         drawHpBar(r, sx + BAR_X, sy + 14, hp, maxHp, 214, 36, 36, BAR_W, BAR_H);
         drawHpBar(r, sx + BAR_X, sy + 32, mp, maxMp,  44, 96, 214, BAR_W, BAR_H);
     };
+
+    // Audit mode marker: a yellow strip across the top of the panel (no font in
+    // the engine yet, so the state has to be readable as a shape).
+    if (auditMode) fillRect(r, 0, 0, SCREEN_W, 4, 250, 210, 40);
 
     panel(0, g_chars[playerIdx].face, false,
           player.hp(), player.maxHp(), player.f.mp, player.f.maxMp);
@@ -445,6 +530,25 @@ static void renderGameOver(SDL_Renderer* r, bool playerWon, int timer) {
     fillRect(r, 0, SCREEN_H - 8, pct, 8, 255, 255, 255);
 }
 
+// AUDIT MODE helper. The canonical hit_ table lives on the standing frame, so a
+// fighter can be driven through every special it owns regardless of what it is
+// doing now. Returns the frame id fired, or 0 when that slot is empty.
+static int auditFire(lf2::Player& p, int slot) {
+    if (!p.f.data || !p.alive()) return 0;
+    const dat::Frame* st = p.f.data->frame(lf2::fid::STANDING);
+    if (!st) return 0;
+    const int ids[6] = { st->hit_Fa, st->hit_Ua, st->hit_Da,
+                         st->hit_Fj, st->hit_Uj, st->hit_Dj };
+    int id = ids[slot % 6];
+    if (id <= 0 || !p.f.data->frame(id)) return 0;
+    p.f.mp = p.f.maxMp;               // MP is not what we are auditing
+    p.f.vx = 0.f;
+    p.f.setFrame(id);
+    ++p.swingId;
+    p.syncAnchor();
+    return id;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Game reset
 // ─────────────────────────────────────────────────────────────────────────────
@@ -478,6 +582,9 @@ static void resetGame(SDL_Renderer* r, lf2::Player& player, int playerIdx,
         slots[i].e.frozen = true;   // TEST MODE: born idle; Start enables the AI
     }
     g_objects.clear();
+#ifdef LF2_HEADLESS
+    ++g_resets;
+#endif
 
     // Test weapons on the ground (knife 120 = light, stone 150 = heavy/solid).
     // Stand next to one and press Attack to pick it up.
@@ -510,13 +617,25 @@ static int fighterWpoint(const lf2::Fighter& f, dat::Wpoint& out) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  main
 // ─────────────────────────────────────────────────────────────────────────────
-int main(int, char*[]) {
+int main(int argc, char* argv[]) {
+#ifdef LF2_HEADLESS
+    // ./bin/lf2-headless [ticks]  — default 60 s of simulated play.
+    if (argc > 1) g_headlessTicks = std::atol(argv[1]);
+    // 2nd arg: roster index. The pool-starvation bug only reproduces with a
+    // fighter whose opoints emit WEAPONS (Henry's arrows, Rudolf's shuriken) —
+    // Dennis only throws balls, which despawn off-map on their own.
+    if (argc > 2) { g_headlessChar = std::atoi(argv[2]); }
+    if (g_headlessChar < 0 || g_headlessChar >= ROSTER_N) g_headlessChar = 0;
+    std::printf("harness: %s, %ld ticks\n", ROSTER[g_headlessChar], g_headlessTicks);
+#else
+    (void)argc; (void)argv;
+#endif
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK);
     IMG_Init(IMG_INIT_PNG);
 
-    g_index = dat::loadIndex("app0:/data/data.txt");
+    g_index = dat::loadIndex((APP + "data/data.txt").c_str());
     for (int i = 0; i < ROSTER_N; i++)
-        g_chars[i].data = dat::load((std::string("app0:/data/") + ROSTER[i] + ".dat").c_str());
+        g_chars[i].data = dat::load((APP + "data/" + ROSTER[i] + ".dat").c_str());
 
     SDL_Joystick* joy = nullptr;
     if (SDL_NumJoysticks() > 0) joy = SDL_JoystickOpen(0);
@@ -528,28 +647,45 @@ int main(int, char*[]) {
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
 
     Scene scene;
-    scene.load(ren, "app0:/bg/sys/lf/bg.dat");   // Lion Forest (only stage wired so far)
+    scene.load(ren, (APP + "bg/sys/lf/bg.dat").c_str());   // Lion Forest (only stage wired so far)
     // Faces up-front (small): the select screen needs all of them.
     for (int i = 0; i < ROSTER_N; i++)
         g_chars[i].face = loadTex(ren,
-            (std::string("app0:/assets/") + ROSTER[i] + "_f.png").c_str(), false);
+            (APP + "assets/" + ROSTER[i] + "_f.png").c_str(), false);
 
     lf2::Player player;
     EnemySlot   slots[NUM_ENEMIES];
     GameSt gameSt        = GameSt::MENU;
+#ifdef LF2_HEADLESS
+    int    menuCursor    = g_headlessChar;   // harness picks the fighter
+#else
     int    menuCursor    = 0;
+#endif
     int    playerIdx     = 0;
     int    gameOverTimer = 0;
     bool   playerWon     = false;
     int    lastSwingId   = -1;
     int    playerPrevFrame = -1;
 
-    bool prevStart = false;
+    bool prevStart = false, prevSel = false;
+    // Audit mode state (Select). auditSlot walks the hit_ table below.
+    bool auditMode  = false;
+    int  auditTimer = 0, auditSlot = 0;
     bool aiEnabled = false;   // TEST MODE default: enemies frozen until Start
     bool prevAtk = false, prevJmp = false, prevL = false, prevR = false,
          prevU = false, prevD = false;
 
-    Uint32 nextTick = SDL_GetTicks();
+    // Fixed-step accumulator with a ceiling. The old form was
+    // `while (now >= nextTick) { …; nextTick += TICK_MS; }`, which never gives up:
+    // if one tick ever costs more than TICK_MS (a texture load, a long frame),
+    // nextTick falls permanently behind and the loop keeps simulating to catch
+    // up — the spiral of death, where the game slows down for good.
+#ifndef LF2_HEADLESS
+    constexpr Uint32 MAX_FRAME_MS = 250;   // ignore stalls longer than this
+#endif
+    constexpr int    MAX_STEPS    = 5;     // then drop the backlog instead of chasing
+    Uint32 prevMs   = SDL_GetTicks();
+    Uint32 accumMs  = 0;
     bool   running  = true;
     SDL_Event ev;
 
@@ -558,14 +694,44 @@ int main(int, char*[]) {
             if (ev.type == SDL_QUIT) running = false;
 
         Uint32 now = SDL_GetTicks();
-        while (now >= nextTick) {
+#ifdef LF2_HEADLESS
+        // Run as fast as the CPU allows: one simulated tick per iteration.
+        // Wall-clock pacing would make a 60 s scenario take 60 s to test.
+        (void)now; (void)prevMs;
+        Uint32 dt = (Uint32)TICK_MS;
+#else
+        Uint32 dt  = now - prevMs;
+        prevMs = now;
+        if (dt > MAX_FRAME_MS) dt = MAX_FRAME_MS;
+#endif
+        accumMs += dt;
+        int steps = 0;
+        while (accumMs >= (Uint32)TICK_MS && steps < MAX_STEPS) {
+            accumMs -= (Uint32)TICK_MS;
+            ++steps;
+#ifdef LF2_HEADLESS
+            // Watch the invariants that only break under sustained play — the
+            // ones that cost device round-trips: pool starvation and objects
+            // that stop animating (a recycled slot stuck as a fake weapon).
+            ++g_tickNo;
+            {
+                int live = 0;
+                g_objects.forEach([&](lf2::Object&){ ++live; });
+                if (live > g_peakObjects) g_peakObjects = live;
+                if (live >= g_objects.SIZE) ++g_poolFullTicks;
+                if (gameSt == GameSt::PLAYING) ++g_playTicks;
+            }
+            if (g_tickNo >= g_headlessTicks) running = false;
+#endif
             InputState raw = readInput(joy);
             bool atk  = raw.atk && !prevAtk;
             bool jmp  = raw.jmp && !prevJmp;
             bool newL = raw.L && !prevL, newR = raw.R && !prevR;
             bool newU = raw.U && !prevU, newD = raw.D && !prevD;
             bool newStart = raw.start && !prevStart;
+            bool newSel   = raw.sel && !prevSel;
             prevAtk = raw.atk; prevJmp = raw.jmp; prevStart = raw.start;
+            prevSel = raw.sel;
             prevL = raw.L; prevR = raw.R; prevU = raw.U; prevD = raw.D;
 
             // TEST MODE: enemies spawn frozen (they still react to hits); Start
@@ -573,6 +739,31 @@ int main(int, char*[]) {
             if (newStart) {
                 aiEnabled = !aiEnabled;
                 for (int i = 0; i < NUM_ENEMIES; i++) slots[i].e.frozen = !aiEnabled;
+            }
+            // AUDIT MODE (Select): every fighter walks its own hit_ table, one
+            // special every AUDIT_PERIOD ticks, with MP topped up. Lets a special
+            // be verified without executing its input, which is the whole point:
+            // "does the move break?" is a different question from "can I do it?".
+            if (newSel) {
+                auditMode = !auditMode; auditTimer = 0; auditSlot = 0;
+                if (auditMode && gameSt == GameSt::PLAYING) {
+                    // Set up a test arena. The enemies spawn at x 1600/2200/2800
+                    // on three different z rows, and nothing walks in audit mode —
+                    // so every special was firing into empty space 1200 px away,
+                    // which reads as "specials do no damage". Line them up at
+                    // melee / short / long range ON the player's z row instead.
+                    const float dist[NUM_ENEMIES] = { 110.f, 260.f, 430.f };
+                    for (int i = 0; i < NUM_ENEMIES; i++) {
+                        lf2::Player& e = slots[i].e.a;
+                        e.x = player.x + dist[i];
+                        e.z = player.z;                 // same z: the 15 px band
+                        e.right = false;                // face the player
+                        e.clampPos(); e.syncAnchor();
+                        slots[i].e.frozen = true;       // stand still to be hit
+                    }
+                    player.right = true;
+                    aiEnabled = false;
+                }
             }
 
             if (gameSt == GameSt::MENU) {
@@ -592,17 +783,66 @@ int main(int, char*[]) {
                 float prevX = player.x, prevZ = player.z;   // for the itr-14 block
                 int   prevState = player.f.state();         // pre-tick: run vs pickup
                 player.tick(raw.L, raw.R, raw.U, raw.D, atk, jmp, raw.def, raw.spc);
+
+                // AUDIT MODE: drive every fighter through its hit_ table. The
+                // enemies are staggered so their projectiles do not all land on
+                // the same tick, which makes it possible to tell them apart.
+                if (auditMode) {
+                    constexpr int AUDIT_PERIOD = 50;      // ~1.7 s per special
+                    if (++auditTimer >= AUDIT_PERIOD) {
+                        auditTimer = 0;
+                        auditFire(player, auditSlot);
+                        for (int i = 0; i < NUM_ENEMIES; i++)
+                            auditFire(slots[i].e.a, auditSlot + i + 1);
+                        ++auditSlot;
+                    }
+                    // Revive on death only — topping HP up at 50 % made everyone
+                    // effectively immortal AND hid the damage being audited: a
+                    // special would land and the bar would refill before you saw
+                    // it move. Now the bars behave normally and a KO just resets
+                    // the fighter, so the session still never ends.
+                    auto revive = [](lf2::Player& p) {
+                        if (p.f.hp > 0) return;
+                        p.f.hp = p.maxHp();
+                        p.f.mp = p.f.maxMp;
+                        p.knockedDown = false;
+                        p.fp = 0;
+                        p.h = 0.f; p.vy = 0.f;
+                        p.f.setFrame(lf2::fid::STANDING);
+                        p.syncAnchor();
+                    };
+                    revive(player);
+                    for (int i = 0; i < NUM_ENEMIES; i++) revive(slots[i].e.a);
+
+                    // Keep the sparring partners ON THEIR FEET. A single fall:70
+                    // special knocks a target down, and LF2's anti-juggle then
+                    // makes every following hit whiff — so from the second move
+                    // on the audit shows nothing landing. Zeroing the falling
+                    // points (and standing them back up) means each special gets
+                    // a fresh, upright target and its damage is actually visible.
+                    for (int i = 0; i < NUM_ENEMIES; i++) {
+                        lf2::Player& e = slots[i].e.a;
+                        e.fp = 0;
+                        int es = e.f.state();
+                        if (e.f.hp > 0 && (es == lf2::ST_FALLING || es == lf2::ST_LYING)) {
+                            e.knockedDown = false;
+                            e.h = 0.f; e.vy = 0.f; e.f.vx = 0.f;
+                            e.f.setFrame(lf2::fid::STANDING);
+                            e.syncAnchor();
+                        }
+                    }
+                }
                 for (int i = 0; i < NUM_ENEMIES; i++)
                     slots[i].e.tick(player.x, player.z);
 
                 // ── opoint spawns (on frame entry) ────────────────────────────
                 if (player.f.frameId != playerPrevFrame) {
-                    spawnOpoints(ren, player.f, 0);
+                    spawnOpoints(player.f, 0);
                     playerPrevFrame = player.f.frameId;
                 }
                 for (int i = 0; i < NUM_ENEMIES; i++) {
                     if (slots[i].e.a.f.frameId != slots[i].prevFrame) {
-                        spawnOpoints(ren, slots[i].e.a.f, 1);
+                        spawnOpoints(slots[i].e.a.f, 1);
                         slots[i].prevFrame = slots[i].e.a.f.frameId;
                     }
                 }
@@ -699,11 +939,37 @@ int main(int, char*[]) {
                 // picking a stone up or throwing it.
                 // A big object STOPS you (F.LF only slows to 10%, but at 10% you
                 // still creep through the stone, which reads as walking inside it).
-                if (blockedByObstacle(player, g_objects, player.heldWeapon)) {
-                    player.x = prevX;
-                    player.z = prevZ;
-                    player.clampPos();
-                    player.syncAnchor();
+                // SWEPT obstacle test. Testing only the final position tunnels:
+                // the stone's kind-14 box is 16 px wide and a run step is 10.5 px,
+                // so a running fighter could be clear on both sides of it in
+                // consecutive ticks and pass straight through. Walk the movement
+                // in short substeps and stop at the last free one.
+                {
+                    const float mvX = player.x - prevX, mvZ = player.z - prevZ;
+                    const float dist = sqrtf(mvX * mvX + mvZ * mvZ);
+                    if (dist > 0.01f) {
+                        player.x = prevX; player.z = prevZ; player.syncAnchor();
+                        // Already inside a box (a special carried you in, or the
+                        // stone landed on you)? Then every direction would be
+                        // refused and you would be stuck: let the move through.
+                        if (!blockedByObstacle(player, g_objects, player.heldWeapon)) {
+                            const int steps = (int)(dist / 5.f) + 1;
+                            float okX = prevX, okZ = prevZ;
+                            for (int s = 1; s <= steps; ++s) {
+                                float t = (float)s / (float)steps;
+                                player.x = prevX + mvX * t;
+                                player.z = prevZ + mvZ * t;
+                                player.syncAnchor();
+                                if (blockedByObstacle(player, g_objects, player.heldWeapon)) break;
+                                okX = player.x; okZ = player.z;
+                            }
+                            player.x = okX; player.z = okZ;
+                        } else {
+                            player.x = prevX + mvX; player.z = prevZ + mvZ;
+                        }
+                        player.clampPos();
+                        player.syncAnchor();
+                    }
                 }
 
                 // ── new player swing re-arms the enemies ─────────────────────
@@ -731,11 +997,14 @@ int main(int, char*[]) {
                             e.hitFlash   = 10;
                             float kb = (float)(hi.dvx > 0 ? hi.dvx : 1);
                             e.a.hit(hi.injury, player.right ? kb : -kb, hi.fall);
+#ifdef LF2_HEADLESS
+                            g_damageDealt += hi.injury;
+#endif
                         }
                     }
                     // …and the same swing damages WEAPONS lying around: they have
                     // <weapon_hp> durability (stone 800, knife 200) and break at 0.
-                    damageObjects(ren, hi, player.right, player.heldWeapon);
+                    damageObjects(hi, player.right, player.heldWeapon);
                 }
 
                 // ── held weapon's itr → enemies ──────────────────────────────
@@ -764,7 +1033,7 @@ int main(int, char*[]) {
                         }
                     }
                     if (swinging) {
-                        damageObjects(ren, whi, player.right, player.heldWeapon);
+                        damageObjects(whi, player.right, player.heldWeapon);
                         for (int i = 0; i < NUM_ENEMIES; i++) {
                             Box ebody; Enemy& e = slots[i].e;
                             if (e.rehitTimer == 0 && e.alive() &&
@@ -799,20 +1068,37 @@ int main(int, char*[]) {
 
                 // ── projectiles hit actors ───────────────────────────────────
                 g_objects.forEach([&](lf2::Object& o) {
-                    // Projectiles hit while in their flying state; a THROWN weapon
-                    // hits with its own itr while airborne.
-                    if (!(o.flying() || o.thrown) || o.rehit > 0) return;
+                    // What decides whether an object can hit is its DATA: the
+                    // current frame either carries an attack itr or it does not.
+                    // Gating on a whitelist of states kept missing cases —
+                    // firen_flame flies in state 18 ("burning"), so the flame went
+                    // right through everyone. The spent states (hiting/hit/
+                    // rebounding) drop their itr in the .dat, so they stop hurting
+                    // on their own, exactly like the original.
+                    if (o.rehit > 0) return;
                     HitInfo ohi;
                     if (!fighterAttack(o.f, ohi)) return;
                     if (o.team == 0) {                       // player's ball → enemies
                         for (int i = 0; i < NUM_ENEMIES; i++) {
                             Box ebody;
                             Enemy& e = slots[i].e;
-                            if (e.alive() && fabsf(o.f.z - e.a.z) < (float)ohi.zwidth &&
+                            // Same anti-juggle the melee path uses: a light hit
+                            // cannot strike someone already falling, and nobody
+                            // hits a body on the floor. Without this, projectiles
+                            // were the only thing that damaged a downed fighter —
+                            // which read as "only the balls and the wind hurt".
+                            int es = e.a.f.state();
+                            bool downed = (es == lf2::ST_FALLING && ohi.fall <= 40) ||
+                                          es == lf2::ST_LYING;
+                            if (e.alive() && !downed &&
+                                fabsf(o.f.z - e.a.z) < (float)ohi.zwidth &&
                                 fighterBody(e.a.f, ebody) && boxOverlap(ohi.box, ebody))
                             {
                                 float kb = (float)(ohi.dvx > 0 ? ohi.dvx : 4);
                                 e.a.hit(ohi.injury, o.f.facingRight ? kb : -kb, ohi.fall);
+#ifdef LF2_HEADLESS
+                                g_damageDealt += ohi.injury;
+#endif
                                 e.hitFlash = 10;
                                 o.onHit();
                                 o.rehit = ohi.rest;
@@ -820,7 +1106,11 @@ int main(int, char*[]) {
                             }
                         }
                     } else if (havePBody) {                  // enemy ball → player
-                        if (fabsf(o.f.z - player.z) < (float)ohi.zwidth && boxOverlap(ohi.box, pBody)) {
+                        int ps2 = player.f.state();
+                        bool pDowned = (ps2 == lf2::ST_FALLING && ohi.fall <= 40) ||
+                                       ps2 == lf2::ST_LYING;
+                        if (!pDowned &&
+                            fabsf(o.f.z - player.z) < (float)ohi.zwidth && boxOverlap(ohi.box, pBody)) {
                             float kb = (float)(ohi.dvx > 0 ? ohi.dvx : 4);
                             player.hit(ohi.injury, o.f.facingRight ? kb : -kb, ohi.fall);
                             o.onHit();
@@ -841,9 +1131,10 @@ int main(int, char*[]) {
             else { // GAMEOVER
                 if (--gameOverTimer <= 0) gameSt = GameSt::MENU;
             }
-
-            nextTick += TICK_MS;
         }
+        // Hit the step ceiling → we are behind. Throw the backlog away instead of
+        // trying to replay it; a dropped frame beats a permanent slow-motion.
+        if (steps == MAX_STEPS) accumMs = 0;
 
         if (gameSt == GameSt::MENU) {
             renderMenu(ren, menuCursor);
@@ -871,7 +1162,7 @@ int main(int, char*[]) {
             // Actors AND objects, painter's order by z — weapons/projectiles must
             // sort with the fighters, not blit on top of everyone.
             struct DrawRef { float z; int kind; int idx; };   // 0 player, 1 enemy, 2 object
-            DrawRef list[NUM_ENEMIES + 1 + lf2::ObjectPool<24>::SIZE];
+            DrawRef list[NUM_ENEMIES + 1 + g_objects.SIZE];
             int nDraw = 0;
             list[nDraw++] = { player.z, 0, 0 };
             for (int i = 0; i < NUM_ENEMIES; i++) list[nDraw++] = { slots[i].e.a.z, 1, i };
@@ -897,7 +1188,7 @@ int main(int, char*[]) {
                 }
             }
 
-            renderHUD(ren, player, playerIdx, slots);
+            renderHUD(ren, player, playerIdx, slots, auditMode);
             if (gameSt == GameSt::GAMEOVER)
                 renderGameOver(ren, playerWon, gameOverTimer);
         }
@@ -905,11 +1196,36 @@ int main(int, char*[]) {
         SDL_RenderPresent(ren);
     }
 
+#ifdef LF2_HEADLESS
+    {
+        int live = 0;
+        g_objects.forEach([&](lf2::Object&){ ++live; });
+        std::printf("\n--- headless run ---\n");
+        std::printf("ticks simulados      : %ld (%.1f s a 30 Hz)\n",
+                    g_tickNo, (double)g_tickNo / 30.0);
+        std::printf("pico do object pool  : %d / %d\n", g_peakObjects, g_objects.SIZE);
+        std::printf("ticks com pool cheio : %ld\n", g_poolFullTicks);
+        std::printf("spawns criados       : %ld (partidas: %ld)\n", g_spawnTotal, g_resets);
+        std::printf("spawns descartados   : %ld %s\n", g_spawnDrops,
+                    g_spawnDrops ? "<<< ESPECIAL SEM PROJETIL" : "");
+        std::printf("ticks em combate     : %ld %s\n", g_playTicks,
+                    g_playTicks < g_tickNo / 4 ? "<<< quase nao jogou" : "");
+        std::printf("objetos vivos no fim : %d\n", live);
+        std::printf("banco de assets      : %d entradas\n", (int)g_objBank.size());
+        std::printf("dano causado (HP)    : %ld %s\n", g_damageDealt,
+                    g_damageDealt == 0 ? "<<< NENHUM GOLPE ACERTOU" : "");
+        bool bad = (g_poolFullTicks > 0) || (g_spawnDrops > 0);
+        std::printf("resultado            : %s\n", bad ? "FALHA" : "ok");
+        if (bad) { SDL_Quit(); return 1; }
+    }
+#endif
     if (joy) SDL_JoystickClose(joy);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     IMG_Quit();
     SDL_Quit();
+#ifndef LF2_HOST
     sceKernelExitProcess(0);
+#endif
     return 0;
 }

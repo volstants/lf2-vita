@@ -5,6 +5,10 @@ Usage:  python3 tools/bmp2png.py assets NAME [NAME...]
         python3 tools/bmp2png.py assets @listfile     (skips existing PNGs)
 Reads assets/NAME.bmp, writes assets/NAME.png preserving pixels 1:1 (the black
 or magenta background is kept — the engine color-keys at load time).
+
+Output is 8-bit PALETTE PNG, like the source BMPs. Every LF2 sheet has <= 256
+colours, so this is lossless, and it more than halves the VPK (16.4 MB of sheets
+became 6.9 MB) — which is what the install time on the Vita is proportional to.
 """
 import struct, os, sys
 from PIL import Image
@@ -87,7 +91,11 @@ def main():
             print(f"MISS {n}.bmp"); fail += 1; continue
         try:
             im = load_bmp(src)
-            im.save(dst, "PNG")
+            # 8-bit palette out: the LF2 sheets never exceed 256 colours, so the
+            # quantisation is exact, and the VPK ends up under half the size.
+            if im.mode == "RGB":
+                im = im.convert("P", palette=Image.ADAPTIVE, colors=256)
+            im.save(dst, "PNG", optimize=True)
             print(f"ok   {n}.bmp {im.size[0]}x{im.size[1]} -> {n}.png")
         except Exception as e:
             print(f"FAIL {n}.bmp: {e}"); fail += 1

@@ -288,6 +288,25 @@ int main() {
         CHECK(q.x > x0 - 60.f, "fighter stops sliding instead of drifting away");
     }
 
+    // ── Falling Points: who goes down, and after how many hits ───────────────
+    // Values are the real ones in the .dat, so this pins the behaviour that a
+    // combo only launches when it COMPLETES, and that a normal arrow has to land
+    // twice. FP adds each itr's `fall`, knocks down above 60, and decays 0.45/tick.
+    {
+        // henry_arrow1: fall 60 — and 60 is NOT > 60, so one arrow never fells.
+        lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
+        v.hit(40, -9.f, 60);
+        CHECK(v.f.state() != lf2::ST_FALLING, "one arrow (fall 60) staggers but does not fell");
+        v.hit(40, -9.f, 60);
+        CHECK(v.f.state() == lf2::ST_FALLING, "the second arrow (fp 120) fells");
+    }
+    {
+        // henry_arrow2, the charged shot: fall 70 — a launcher, fells at once.
+        lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
+        v.hit(50, -20.f, 70);
+        CHECK(v.f.state() == lf2::ST_FALLING, "charged arrow (fall 70) fells in one hit");
+    }
+
     if (g_fail) { std::printf("\n%d CHECK(S) FAILED\n", g_fail); return 1; }
     std::printf("\nall player tests passed\n");
     return 0;

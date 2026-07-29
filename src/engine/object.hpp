@@ -30,6 +30,10 @@ enum ObjState {
     // ends on `next: 999`, which loops back to the first frame — fine for a ball
     // in flight, but an effect must play once and go, or the debris sits there.
     OST_EFFECT       = 9999,
+    // 18 = burning. firen_flame.dat spends its whole damaging life in this state
+    // (frames 1-9, 100-104, the explosion 110-117), NOT in 3000 — so a hit test
+    // that only accepted 3000/3005 let Firen's fire pass through everyone.
+    OST_FIRE         = 18,
 };
 
 // Canonical ball frame ids.
@@ -69,12 +73,20 @@ struct Object {
     int   loopGuard = -1;   // highest frame id seen, for one-shot effects
     bool  ephemeral = false;// spawned by an opoint (arrow/shuriken): expires once
                             // it has come to rest. Stage weapons are permanent.
+    // Ticks a self-looping effect is allowed to keep burning once its frame
+    // chain is seen wrapping (Firen's ground fire).
+    static constexpr int LOOP_TTL = 30 * 3;
 
     void spawn(const dat::File* d, int sheet, float ax, float ay, float az,
                bool facingRight, int action, int ownerTeam,
                float vx0 = 0.f, float vy0 = 0.f)
     {
-        f = Fighter();
+        // Wipe the WHOLE slot first. The pool recycles slots, and a hand-written
+        // list of fields to clear is a standing trap: one forgotten field brought
+        // an arrow's weaponType back as smoke that froze on screen and could be
+        // picked up. Assigning a fresh Object means any field added later is
+        // reset by construction, not by remembering to add a line here.
+        *this = Object();
         f.load(d);
         f.facingRight = facingRight;
         f.x = ax; f.y = ay; f.z = az;
@@ -92,23 +104,13 @@ struct Object {
         team   = ownerTeam;
         rehit  = 0;
         ttl    = 30 * 12;            // 12 s hard cap
-        active = true;
-        // FULL reset — the pool reuses slots, and leaving these set made a slot
-        // that once held an arrow (weaponType 1) come back as smoke that still
-        // "was a weapon": the weapon branch of tick() returns before animating, so
-        // it froze on screen forever AND could be picked up and thrown.
-        weaponType = 0;
-        held       = false;
-        thrown     = false;
-        vz         = 0.f;
-        groundY    = az;
-        loopGuard  = -1;
-        ephemeral  = false;
+        active  = true;
+        groundY = az;                // floor line defaults to the spawn depth
     }
 
     bool flying() const {
         int s = f.state();
-        return s == OST_FLYING || s == OST_FLYING_INERT;
+        return s == OST_FLYING || s == OST_FLYING_INERT || s == OST_FIRE;
     }
 
     // Connected with someone. A ball plays its hit animation and stops; a thrown
@@ -181,9 +183,17 @@ struct Object {
     bool takeHit(int injury, bool fromRight) {
         if (weaponType <= 0) return false;
         f.hp -= (injury > 0 ? injury : 10);
-        f.vx  = fromRight ? -3.f : 3.f;
         if (!held) {
-            f.vy   = (weaponType >= 2) ? -2.f : -3.f;   // soft bounce up
+            if (weaponType >= 2) {
+                // Heavy: F.LF gives it soft_bounceup.speed.y = -2 and NOTHING
+                // horizontal — a struck stone hops in place. Pushing it sideways
+                // walked it into the player, who could then creep through it.
+                f.vy = -2.f;
+                f.vx = 0.f;
+            } else {
+                f.vx = fromRight ? -3.f : 3.f;          // GC.weapon.hit.vx
+                f.vy = -3.f;
+            }
             thrown = true;                              // rejoin the airborne path
         }
         return f.hp <= 0;
@@ -221,6 +231,10 @@ struct Object {
                 f.y = floorY;
                 thrown = false;
                 restOnGround(f.x, floorY, f.z, f.facingRight);
+                // Spent arrows/shuriken linger only briefly. The old 12 s cap let
+                // ~18 rapid shots pile up and choke the pool, so Henry's attack
+                // animation played with no arrow until slots freed up.
+                if (ephemeral) ttl = 30 * 3;
             }
             if (f.x < -200.f || f.x > (float)MAP_W + 200.f) active = false;
             return;
@@ -229,12 +243,16 @@ struct Object {
         f.y += f.vy;
         int beforeId = f.frameId;
         f.advance();
-        // One-shot effects: the moment the chain wraps to an earlier frame the
-        // animation has played through, so retire it instead of looping forever.
-        if (f.state() == OST_EFFECT) {
-            if (loopGuard >= 0 && f.frameId < beforeId) { active = false; return; }
-            loopGuard = beforeId;
+        if (f.frameId < beforeId) {          // the chain wrapped backwards
+            // A one-shot effect (broken debris, state 9999) has finished: retire.
+            if (f.state() == OST_EFFECT && loopGuard >= 0) { active = false; return; }
+            // Anything else that loops burns for a few seconds and goes out.
+            // firen_flame's ground_fire (frames 52-59) loops forever by design;
+            // in the original it burns out, here it used to sit on the field for
+            // the full 12 s safety ttl.
+            if (ttl > LOOP_TTL) ttl = LOOP_TTL;
         }
+        loopGuard = beforeId;
         if (f.removed || --ttl <= 0 ||
             f.x < -200.f || f.x > (float)MAP_W + 200.f)
             active = false;

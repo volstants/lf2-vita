@@ -50,6 +50,10 @@ constexpr int     BTN_JUMP    = 1;  // Circle
 constexpr int     BTN_DEFEND  = 0;  // Triangle (confirmed on device)
 constexpr int     BTN_SPECIAL = 3;  // Square — arms a special; direction fires it
 constexpr int     BTN_START   = 11; // Start — TEST MODE: toggles enemy AI on/off
+constexpr int     BTN_SELECT  = 10; // Select — AUDIT MODE: every fighter cycles
+                                    // through its own hit_ slots automatically,
+                                    // so specials can be verified without having
+                                    // to input the combos by hand.
 constexpr int     DEADZONE   = 8000;   // compared against SDL_JoystickGetAxis (Sint16)
 
 // ── Hit detection ─────────────────────────────────────────────────────────────

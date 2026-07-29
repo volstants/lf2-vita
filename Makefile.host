@@ -10,7 +10,35 @@ CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -I src
 BIN      := bin
 
-.PHONY: all test tools scan clean check-assets
+.PHONY: all test tools scan clean check-assets check-main harness
+
+# Type-check main.cpp against the REAL SDL2 headers (tools/host_sdl.sh fetches
+# them without root). Hand-written ABI stubs were used before and are a bad
+# trade: a wrong struct layout compiles fine and corrupts memory at runtime.
+SDLHOST := .sdlhost/root/usr/include
+check-main:
+	@[ -d "$(SDLHOST)/SDL2" ] || ./tools/host_sdl.sh
+	$(CXX) -std=c++17 -Wall -Wextra -fsyntax-only \
+	  -I $(SDLHOST)/x86_64-linux-gnu -I $(SDLHOST) -I src src/main.cpp
+	@echo "main.cpp OK (real SDL2 headers)"
+
+# Headless harness: builds the REAL main.cpp for the host (LF2_HOST maps app0:/
+# to the repo) and runs the actual game loop with scripted input under SDL's
+# dummy video driver. One simulated tick per iteration, so 5 min of play takes
+# about a second. This is what catches the class of bug that used to need a
+# device round-trip: pool starvation, objects that stop retiring, crashes.
+#
+#   make -f Makefile.host harness            # 60 s of play
+#   make -f Makefile.host harness TICKS=9000 # 5 min
+TICKS ?= 1800
+harness: | $(BIN)
+	@[ -d "$(SDLHOST)/SDL2" ] || ./tools/host_sdl.sh
+	$(CXX) -std=c++17 -O1 -Wall -Wextra -DLF2_HOST -DLF2_HEADLESS \
+	  -I $(SDLHOST)/x86_64-linux-gnu -I $(SDLHOST) -I src src/main.cpp \
+	  -o $(BIN)/lf2-headless \
+	  -L .sdlhost/lib -L /lib/x86_64-linux-gnu -lSDL2-2.0 -lSDL2_image-2.0
+	@SDL_VIDEODRIVER=dummy LD_LIBRARY_PATH=".sdlhost/lib:/lib/x86_64-linux-gnu" \
+	  ./$(BIN)/lf2-headless $(TICKS)
 
 all: tools test
 
