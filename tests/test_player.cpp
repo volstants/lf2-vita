@@ -414,6 +414,34 @@ int main() {
         }
     }
 
+    // ── Achados da revisão externa (2026-07-29) ──────────────────────────────
+    {   // #1 knockedDown ficava preso: um golpe leve em quem estava deitado saía
+        // de ST_LYING sem limpar a flag, e todo pulo seguinte terminava em 230.
+        lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
+        v.hit(10, -5.f, 70);                       // derruba
+        int g2 = 0;
+        while (v.state() != lf2::ST_LYING && g2++ < 120) v.tick(0,0,0,0,false,false);
+        CHECK(v.knockedDown, "um fall:70 derruba e marca knockedDown");
+        v.hit(10, -2.f, 10);                       // golpe leve em quem está no chão
+        for (int i = 0; i < 60; ++i) v.tick(0,0,0,0,false,false);
+        CHECK(!v.knockedDown, "knockedDown é limpo ao voltar a ficar de pé");
+    }
+    {   // #6 alvo no ar deve ser derrubado por qualquer golpe (F.LF fall()).
+        lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
+        v.tick(0,0,0,0,false,true);                // pula
+        CHECK(!v.grounded(), "está no ar");
+        v.hit(10, -2.f, 10);                       // jab fraco
+        CHECK(v.knockedDown, "golpe fraco em alvo no ar derruba (anti-aéreo)");
+    }
+    {   // #5 alvo congelado estilhaça com qualquer golpe.
+        lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
+        v.hit(10, -2.f, 20, /*effect=*/3);
+        for (int i = 0; i < 6; ++i) v.tick(0,0,0,0,false,false);
+        CHECK(v.state() == lf2::ST_ICE, "congelado");
+        v.hit(10, -2.f, 10);                       // golpe fraco no gelo
+        CHECK(v.knockedDown, "golpe em alvo congelado sempre derruba");
+    }
+
     if (g_fail) { std::printf("\n%d CHECK(S) FAILED\n", g_fail); return 1; }
     std::printf("\nall player tests passed\n");
     return 0;

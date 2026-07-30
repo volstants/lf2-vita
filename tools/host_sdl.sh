@@ -46,6 +46,13 @@ fi
 # libSDL2 is usually already on the system; libSDL2_image usually is not. The
 # pysdl2-dll wheel ships both as plain .so files, but without the soname
 # symlinks (libFoo.so.0) that the linker records, so we create those.
+#
+# COPY, don't symlink into site-packages. This used to link straight at the
+# wheel's install path, which on a sandboxed host is under a per-session
+# directory: the next session found .sdlhost/lib full of dangling links and
+# `make harness` died with "cannot find -lSDL2-2.0" while the headers — the only
+# thing the Makefile checked — were still there. A local copy costs ~10 MB in a
+# gitignored folder and survives.
 mkdir -p "$DEST/lib"
 if ! ldconfig -p 2>/dev/null | grep -q libSDL2_image; then
     pip install -q pysdl2-dll --break-system-packages 2>/dev/null || pip install -q pysdl2-dll
@@ -60,10 +67,16 @@ except Exception:
 EOF
 )"
 if [ -n "$DLL" ] && [ -d "$DLL" ]; then
-    for f in "$DLL"/*.so; do
-        b="$(basename "$f" .so)"
-        ln -sf "$f" "$DEST/lib/$b.so"
-        ln -sf "$f" "$DEST/lib/$b.so.0"
+    for f in "$DLL"/*.so "$DLL"/*.so.*; do
+        [ -e "$f" ] || continue
+        cp -f "$f" "$DEST/lib/"
     done
-    echo "SDL2 runtime libs linked into $DEST/lib"
+    # soname aliases (libFoo.so → libFoo.so.0), relative so the folder is movable
+    ( cd "$DEST/lib" && for f in *.so; do ln -sf "$f" "${f%.so}.so.0"; done )
+    echo "SDL2 runtime libs copied into $DEST/lib"
 fi
+
+# Fail loudly rather than leaving a half-built .sdlhost the Makefile will trust.
+for want in libSDL2-2.0.so.0 libSDL2_image-2.0.so.0; do
+    [ -r "$DEST/lib/$want" ] || { echo "host_sdl.sh: $want missing/unreadable" >&2; exit 1; }
+done

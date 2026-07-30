@@ -230,7 +230,8 @@ static void damageObjects(const HitInfo& hi, bool fromRight, int skipIdx,
 // The test is x/y + a z band, so jumping clears it for free: in the air the
 // player's body box no longer overlaps the obstacle's ground-level box.
 template <int N>
-static bool blockedByObstacle(const lf2::Player& p, lf2::ObjectPool<N>& objs, int heldIdx) {
+static bool blockedByObstacle(const lf2::Player& p, lf2::ObjectPool<N>& objs, int heldIdx,
+                              float* obstacleX = nullptr) {
     Box pb;
     if (!fighterBody(p.f, pb)) return false;
     bool blocked = false;
@@ -246,7 +247,10 @@ static bool blockedByObstacle(const lf2::Player& p, lf2::ObjectPool<N>& objs, in
             if (it.kind != 14 || blocked) return;
             float zw = (float)(it.zwidth > 0 ? it.zwidth : 15);
             if (fabsf(o.f.z - p.z) >= zw) return;
-            if (boxOverlap(toBox(wb), pb)) blocked = true;
+            if (boxOverlap(toBox(wb), pb)) {
+                blocked = true;
+                if (obstacleX) *obstacleX = o.f.x;
+            }
         });
         if (blocked) break;
     }
@@ -413,42 +417,43 @@ static void spawnOpoints(const lf2::Fighter& f, int team) {
         if (op.kind != 1) continue;
         ObjAssets* oa = objAssetsCached(op.oid);
         if (!oa) continue;
-        lf2::Object* o = g_objects.alloc();
-        if (!o) {
+        // `facing` is NOT just a direction: it encodes COUNT * 10 + direction.
+        // F.LF character.js:2002 — `if (Math.abs(facing) > 10)
+        // create_multiple_objects(op, parent, floor(facing/10), dvz || 3)`.
+        // henry frame 286 is literally named 5_arrow with facing 50, rudolf 288
+        // throws 5 shuriken and his frame 271 (+man) spawns 2 clones with facing
+        // 20. We were reading facing purely as a direction and emitting ONE.
+        int count = (op.facing >= 10 || op.facing <= -10) ? (abs(op.facing) / 10) : 1;
+        int dir   = abs(op.facing) % 10;
+        bool faceRight = (dir == 1) ? !f.facingRight : f.facingRight;
+        float spread = 3.f;   // F.LF passes `dvz || 3`; the parser has no dvz on Opoint
+        for (int n = 0; n < count; ++n) {
+            lf2::Object* o = g_objects.alloc();
+            if (!o) {
 #ifdef LF2_HEADLESS
-            // THE symptom: a special animates but emits nothing. Counting this
-            // directly beats watching the pool high-water mark, which only goes
-            // full in the worst case and hides a slow leak.
-            ++g_spawnDrops;
+                ++g_spawnDrops;
 #endif
-            continue;
-        }
+                continue;
+            }
 #ifdef LF2_HEADLESS
-        ++g_spawnTotal;
+            ++g_spawnTotal;
 #endif
-        float wx, wy;
-        f.pointWorld(op.x, op.y, wx, wy);
-        bool faceRight = (op.facing == 1) ? !f.facingRight : f.facingRight;
-        float vx0 = faceRight ? (float)op.dvx : -(float)op.dvx;   // launch in facing dir
-        o->spawn(&oa->data, objBankIndex(oa), wx, wy, f.z,
-                 faceRight, op.action, team, vx0, (float)op.dvy);
-        // Several "projectiles" are actually WEAPON objects in data.txt: Henry's
-        // arrows (oid 201) and Rudolf's darts (oid 202) are type 1. Left at
-        // weaponType 0 they took the ball path — no gravity (a negative opoint
-        // dvy climbed forever) and the hit test (flying() || thrown) never
-        // matched their weapon frames, so they passed straight through. Tag them
-        // and mark them airborne: gravity arcs them and they can connect.
-        // (Only types 1/2 — type 3 is a real projectile/effect and must keep the
-        // straight-flight ball path.)
-        const dat::ObjectEntry* oe = g_index.object(op.oid);
-        int oty = oe ? oe->type : 0;
-        if (oty == 1 || oty == 2) {
-            o->weaponType = oty;
-            o->thrown     = true;
-            o->groundY    = f.z;       // floor line to land back on
-            o->ephemeral  = true;      // must expire after landing, or the pool
-                                       // fills with spent arrows and no special
-                                       // can spawn anything ever again
+            float wx, wy;
+            f.pointWorld(op.x, op.y, wx, wy);
+            // Fan the copies out in depth around the parent, like the original's
+            // multi-spawn does, so five arrows do not stack into one.
+            float dz = (count > 1) ? ((float)n - (float)(count - 1) * 0.5f) * spread : 0.f;
+            float vx0 = faceRight ? (float)op.dvx : -(float)op.dvx;
+            o->spawn(&oa->data, objBankIndex(oa), wx, wy, f.z + dz,
+                     faceRight, op.action, team, vx0, (float)op.dvy);
+            const dat::ObjectEntry* oe = g_index.object(op.oid);
+            int oty = oe ? oe->type : 0;
+            if (oty == 1 || oty == 2) {
+                o->weaponType = oty;
+                o->thrown     = true;
+                o->groundY    = f.z + dz;
+                o->ephemeral  = true;
+            }
         }
     }
 }
@@ -720,6 +725,7 @@ int main(int argc, char* argv[]) {
     // Audit mode state (Select). auditSlot walks the hit_ table below.
     bool auditMode  = false;
     int  auditTimer = 0, auditSlot = 0;
+    int  auditDownTicks[NUM_ENEMIES] = {0};
     bool aiEnabled = false;   // TEST MODE default: enemies frozen until Start
     bool prevAtk = false, prevJmp = false, prevL = false, prevR = false,
          prevU = false, prevD = false;
@@ -863,21 +869,25 @@ int main(int argc, char* argv[]) {
                     revive(player);
                     for (int i = 0; i < NUM_ENEMIES; i++) revive(slots[i].e.a);
 
-                    // Keep the sparring partners ON THEIR FEET. A single fall:70
-                    // special knocks a target down, and LF2's anti-juggle then
-                    // makes every following hit whiff — so from the second move
-                    // on the audit shows nothing landing. Zeroing the falling
-                    // points (and standing them back up) means each special gets
-                    // a fresh, upright target and its damage is actually visible.
+                    // Do NOT zero the falling points every tick: that made the
+                    // targets un-knockdownable and hid the very thing being
+                    // audited (a fall:70 special looked like it did nothing).
+                    // Instead, let knockdowns happen and stand the target back up
+                    // after it has been down for a moment, so the next special in
+                    // the cycle still finds someone upright.
                     for (int i = 0; i < NUM_ENEMIES; i++) {
                         lf2::Player& e = slots[i].e.a;
-                        e.fp = 0;
                         int es = e.f.state();
-                        if (e.f.hp > 0 && (es == lf2::ST_FALLING || es == lf2::ST_LYING)) {
-                            e.knockedDown = false;
-                            e.h = 0.f; e.vy = 0.f; e.f.vx = 0.f;
-                            e.f.setFrame(lf2::fid::STANDING);
-                            e.syncAnchor();
+                        if (e.f.hp > 0 && es == lf2::ST_LYING) {
+                            if (++auditDownTicks[i] > 20) {
+                                auditDownTicks[i] = 0;
+                                e.knockedDown = false; e.fp = 0;
+                                e.h = 0.f; e.vy = 0.f; e.f.vx = 0.f;
+                                e.f.setFrame(lf2::fid::STANDING);
+                                e.syncAnchor();
+                            }
+                        } else if (es != lf2::ST_FALLING) {
+                            auditDownTicks[i] = 0;
                         }
                     }
                 }
@@ -1012,10 +1022,20 @@ int main(int argc, char* argv[]) {
                     const float dist = sqrtf(mvX * mvX + mvZ * mvZ);
                     if (dist > 0.01f) {
                         player.x = prevX; player.z = prevZ; player.syncAnchor();
-                        // Already inside a box (a special carried you in, or the
-                        // stone landed on you)? Then every direction would be
-                        // refused and you would be stuck: let the move through.
-                        if (!blockedByObstacle(player, g_objects, player.heldWeapon)) {
+                        // Was the START of the move already overlapping? The swept
+                        // walk stops AT contact, so the very next tick starts in
+                        // contact — and "already inside → let it through" then
+                        // waved the runner straight through the stone (it blocked
+                        // for exactly one tick). Escape is now allowed only when
+                        // the step moves AWAY from the obstacle's centre.
+                        float obsX = 0.f;
+                        bool stuck = blockedByObstacle(player, g_objects,
+                                                       player.heldWeapon, &obsX);
+                        if (stuck) {
+                            bool away = fabsf((prevX + mvX) - obsX) > fabsf(prevX - obsX);
+                            if (away) { player.x = prevX + mvX; player.z = prevZ + mvZ; }
+                            else      { player.x = prevX;       player.z = prevZ; }
+                        } else {
                             const int steps = (int)(dist / 5.f) + 1;
                             float okX = prevX, okZ = prevZ;
                             for (int s = 1; s <= steps; ++s) {
@@ -1027,8 +1047,6 @@ int main(int argc, char* argv[]) {
                                 okX = player.x; okZ = player.z;
                             }
                             player.x = okX; player.z = okZ;
-                        } else {
-                            player.x = prevX + mvX; player.z = prevZ + mvZ;
                         }
                         player.clampPos();
                         player.syncAnchor();
@@ -1108,6 +1126,7 @@ int main(int argc, char* argv[]) {
                         if (swinging && wd && hw.attacking < 8 && wd->strength[hw.attacking].valid) {
                             const dat::StrengthEntry& se = wd->strength[hw.attacking];
                             whi.injury = se.injury; whi.fall = se.fall; whi.dvx = se.dvx;
+                            whi.effect = se.effect;   // weapon7 (ice sword) is effect 3
                             if (se.vrest > 0) whi.rest = se.vrest;
                         }
                     }
@@ -1115,13 +1134,18 @@ int main(int argc, char* argv[]) {
                         damageObjects(whi, player.right, player.heldWeapon, /*attackerArmed=*/true);
                         for (int i = 0; i < NUM_ENEMIES; i++) {
                             Box ebody; Enemy& e = slots[i].e;
-                            if (e.rehitTimer == 0 && e.alive() &&
+                            int wes = e.a.f.state();
+                            bool wDowned = ((wes == lf2::ST_FALLING && whi.fall <= 40) ||
+                                            wes == lf2::ST_LYING) &&
+                                           !itrIgnoresAntiJuggle(whi.kind);
+                            if (e.rehitTimer == 0 && e.alive() && !wDowned &&
+                                !e.a.untouchable() &&
                                 fabsf(player.z - e.a.z) < (float)whi.zwidth &&
                                 fighterBody(e.a.f, ebody) && boxOverlap(whi.box, ebody)) {
                                 e.rehitTimer = whi.rest;
                                 e.hitFlash   = 10;
                                 float kb = (float)(whi.dvx > 0 ? whi.dvx : 4);
-                                e.a.hit(whi.injury, player.right ? kb : -kb, whi.fall);
+                                e.a.hit(whi.injury, player.right ? kb : -kb, whi.fall, whi.effect);
                             }
                         }
                     }
@@ -1134,10 +1158,21 @@ int main(int argc, char* argv[]) {
                     for (int i = 0; i < NUM_ENEMIES; i++) {
                         HitInfo ehi;
                         Enemy& e = slots[i].e;
-                        if (!e.hasHitPlayer && e.alive() &&
+                        // fighterAttack FIRST: the z test used to be evaluated
+                        // before it, so `ehi.zwidth` was still the default 15 and
+                        // every wide attack (henry has itrs with zwidth 76/55/34)
+                        // was silently narrowed. && short-circuits left to right.
+                        int ps3 = player.f.state();
+                        bool pDown = ((ps3 == lf2::ST_FALLING && ehi.fall <= 40) ||
+                                      ps3 == lf2::ST_LYING);
+                        if (!e.hasHitPlayer && e.alive() && !player.untouchable() &&
+                            fighterAttack(e.a.f, ehi) &&
+                            !(((ps3 == lf2::ST_FALLING && ehi.fall <= 40) ||
+                               ps3 == lf2::ST_LYING) && !itrIgnoresAntiJuggle(ehi.kind)) &&
                             fabsf(player.z - e.a.z) < (float)ehi.zwidth &&
-                            fighterAttack(e.a.f, ehi) && boxOverlap(ehi.box, pBody))
+                            boxOverlap(ehi.box, pBody))
                         {
+                            (void)pDown;
                             e.hasHitPlayer = true;
                             float kb = (float)(ehi.dvx > 0 ? ehi.dvx : 1);
                             player.hit(ehi.injury, e.a.right ? kb : -kb, ehi.fall, ehi.effect);

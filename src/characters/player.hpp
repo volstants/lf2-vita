@@ -218,8 +218,9 @@ struct Player {
         if (f.flipReq)   { f.flipReq = false; right = !right; }              // next < 0
         if (vanish > 0) --vanish;
         if (burn > 0 && --burn == 0 && f.state() == ST_BURNING) {
-            f.setFrame(fid::FALLING);      // the burn ends with the victim down
-            knockedDown = true;
+            // Enter the tumble; the promotion below turns it into a real knockdown
+            // (setting knockedDown here would suppress that and freeze frame 180).
+            f.setFrame(fid::FALLING);
         }
 
         // GROUND FRICTION (F.LF mechanics.dynamics: ps.fric = 1 per tick while
@@ -261,6 +262,26 @@ struct Player {
         if (seqStage == 2 && fr && !wantSlot) {
             if (atk)      { wantSlot = seqDir==1?fr->hit_Ua:seqDir==2?fr->hit_Da:fr->hit_Fa; atkConsumed=true;  seqStage=0; }
             else if (jmp) { wantSlot = seqDir==1?fr->hit_Uj:seqDir==2?fr->hit_Dj:fr->hit_Fj; jumpConsumed=true; seqStage=0; }
+        }
+
+        // knockedDown used to be cleared ONLY inside the ST_LYING branch, so any
+        // other way out of it (a light hit on a downed victim sends you to 220)
+        // left the flag set forever: every later landing snapped to LYING and the
+        // juggle test killed all knockback. Clear it whenever we are upright on
+        // the ground and no longer in the fall/lie chain.
+        if (knockedDown && grounded()) {
+            int ks = f.state();
+            if (ks != ST_FALLING && ks != ST_LYING) knockedDown = false;
+        }
+
+        // A frame chain can DROP INTO a falling frame while the actor is still on
+        // the ground: the ice chain ends at 182 and the burn timer sends you to
+        // 180. Grounded, nothing integrates that fall, so the victim just stood
+        // there in the first frame of a tumble. Promote it to a real knockdown.
+        if (grounded() && !knockedDown && f.state() == ST_FALLING) {
+            knockedDown = true;
+            h  = -0.1f;
+            vy = -6.f;
         }
 
         if (!grounded()) { airborneTick(U, D, atk); syncAnchor(); return; }
@@ -614,7 +635,11 @@ struct Player {
         // entirely — Firen's fire and Freeze's ice landed as plain damage.
         if (effectIsIce(effect)) {
             if (effectDropsWeapon(effect)) dropWeaponReq = true;
-            if (f.state() != ST_ICE) {          // already frozen: don't restart
+            // Frame 200 is state 15 and only 201 is 13, so testing the state
+            // alone let a second ice hit in the first ticks restart the chain.
+            bool alreadyIced = (f.state() == ST_ICE) ||
+                               f.frameId == fid::ICE || f.frameId == fid::ICE + 1;
+            if (!alreadyIced) {
                 fp = 0; burn = 0; knockedDown = false;
                 f.vx = 0.f; h = 0.f; vy = 0.f;
                 f.setFrame(fid::ICE);           // 200 → 201 (3 s) → 202 → falling
@@ -639,7 +664,15 @@ struct Player {
         // flurry hits (dvx 2) barely nudge — keeping the victim in the combo —
         // while a launcher (dvx 12/fall 70) crosses 60 at once and throws.
         fp += itrFall;
-        if (fp > FP_FALL || f.hp <= 0) {              // knockdown / juggle
+        // F.LF fall(): besides the FP threshold, a hit ALWAYS fells you when you
+        // are frozen (state 13) or already off the ground — that is what makes
+        // ice shatter and what gives the game its anti-air.
+        //   character.js:1665  if ($.state() == 13) { falldown() }
+        //   character.js:1668  else if ($.ps.y < 0 || $.ps.vy < 0) { falldown() }
+        bool frozen   = (f.state() == ST_ICE) || f.frameId == fid::ICE ||
+                        f.frameId == fid::ICE + 1;
+        bool airborne = !grounded() || vy < 0.f;
+        if (fp > FP_FALL || f.hp <= 0 || frozen || airborne) {   // knockdown / juggle
             fp = 0;
             bool juggle = knockedDown;                // already airborne = re-hit
             knockedDown = true;

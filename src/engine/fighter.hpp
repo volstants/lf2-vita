@@ -157,6 +157,13 @@ struct Fighter {
         const dat::Frame* f = cur();
         if (!f) { setFrame(STANDING_FRAME); return; }
         int nx = f->next;
+        // `next: 0` means HOLD THIS FRAME — not "go to frame 0". F.LF is explicit
+        // about it (`if (next === 0) { // do nothing }` in livingobject.trans).
+        // We were jumping to frame 0, which is STANDING, so anything ending on a
+        // next:0 frame popped upright: the falling frames 180-186 are all next:0,
+        // and that is why a burnt or frozen victim never stayed down. Whoever owns
+        // the state (the landing code, cycleAnim…) decides when to leave.
+        if (nx == 0) return;
         bool flip = false;
         if (nx < 0) { flip = true; nx = -nx; }
         if (nx == NEXT_REMOVE) { removed = true; return; }

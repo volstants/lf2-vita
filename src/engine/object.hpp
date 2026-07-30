@@ -113,6 +113,17 @@ struct Object {
         return s == OST_FLYING || s == OST_FLYING_INERT || s == OST_FIRE;
     }
 
+    // May this object's itrs connect right now? Enumerating "active" states kept
+    // biting us: the wind flies in 3005, Firen's flame burns in 18, and
+    // freeze_column's damaging frames are state 15 — each one silently did no
+    // damage until its state was added. Invert the test instead: everything can
+    // hit EXCEPT the post-hit / dying states, which carry no itr anyway.
+    bool canHit() const {
+        int s = f.state();
+        return s != OST_HITING && s != OST_HIT &&
+               s != OST_REBOUNDING && s != OST_DISAPPEARING && s != OST_EFFECT;
+    }
+
     // Connected with someone. A ball plays its hit animation and stops; a thrown
     // weapon bounces back a little and keeps falling (F.LF: weapon.hit.vx = -3).
     void onHit() {
