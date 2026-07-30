@@ -2,7 +2,10 @@
 
 > **Leia este arquivo primeiro.** Documento autoritativo para continuar o
 > desenvolvimento em uma nova instância do Claude.
-> Companheiros: `CHECKLIST.md` (roadmap), `STATUS.md` (bugs/achados), `tools/DECOMPILE.md`.
+> Companheiros: `CHECKLIST.md` (roadmap), `STATUS.md` (bugs/achados),
+> `tools/DECOMPILE.md` (regerar o decomp), **`tools/BINARY_NOTES.md` (ler o
+> `lf2.exe` direto — constantes de física, OpenLF2 como pedra de roseta)**,
+> `REVIEW_PROMPT.md` (prompt de instância revisora).
 
 ---
 
@@ -57,7 +60,7 @@ tools/ghidra_*.py         decompilação (ver seção 7)
 | Parâmetro | Valor | Fonte |
 |---|---|---|
 | Timestep | 30 Hz (`TICK_MS=33`) | LF2 nativo |
-| Gravidade | `1.7` | F.LF global.js |
+| Gravidade | `1.7` | **binário** `lf2.exe` @0x48348 (double, única ocorrência) — antes só F.LF |
 | Falling Points | começa 0; hit SOMA `fall`; decai **0.45**/tick | F.LF + LF2 Fandom |
 | FP > 40 | Dance of Pain (atordoa em pé) | idem |
 | FP > 60 | knockdown, FP=0 | idem |
@@ -99,7 +102,34 @@ um wpoint kind 1 **com velocidade** (frames 47/51/54). Ataque armado no ar/corri
 = arremesso (frames sem wpoint soltavam a arma). `solid()` só p/ arma pesada
 **parada no chão** (não segurada, não arremessada). AGUARDA RETESTE no device.
 
-**Não implementado:** códigos `next` 1000+ (LouisEX, teleporte do Woody) ·
+**Códigos `next` especiais — FEITO.** Levantamento nos 67 `.dat`: só existem
+**três** fora do comum, não a família inteira que eu supunha.
+`1000` = remove o objeto (já havia). `1280` = *disappear* (Rudolf frame 257, via
+`hit_Uj` 250 por 350 MP): volta ao standing e o lutador fica **invisível e
+intocável** por 150 ticks (5 s), sombra piscando nos últimos 30 antes de voltar —
+é o `effect.super` do F.LF (`character.js` state1280_disappear + `GC.effect.disappear`
+shadow_blink 120 / body_blink 150). `next` **negativo** = vai para `|next|` e
+**inverte o facing** (F.LF `switch_dir_after_trans`), usado no c-throw do Louis
+(frame 270, `next: -999`). Atenção: o facing de personagem mora no controlador e
+é empurrado para o Fighter pelo `syncAnchor()` todo tick, então o Fighter só
+levanta a flag (`flipReq`) e o Player é quem inverte.
+**LouisEX e a transformação seguem fora** — dependem de trocar o `.dat` em
+runtime (`transform_character`), não de código `next`.
+
+**`itr.effect` — FEITO (2026-07-29).** Eram **450 itrs** com efeito não-zero,
+completamente ignorados: fogo do Firen e gelo do Freeze chegavam como dano
+genérico. Tabela do OpenLF2 (`const.c:135-146`): 0 punch · 1 bleed · 2 fire ·
+3 freeze · 4 shrafe · 20 burn · 21 flame · 22 firen_explosion ·
+23 julian_explosion · 30 column. Ação por família (F.LF `character.js:1721-1732`):
+**2/21/22/23** queimam **e derrubam a arma da mão**; **20** queima sem derrubar;
+**3/30** congelam e derrubam a arma. Frames de vítima são canônicos: gelo
+**200 → 201 (state 13, wait 90 = 3 s) → 202 → 182** (auto-suficiente, o dado
+governa); fogo **203↔204 (state 18)** faz laço infinito, então a saída é externa —
+trava de **36 ticks** (F.LF `trans.frame(203, 36)`) e o alvo desaba. Vítima já em
+chamas é **imune** aos efeitos fracos 20/21. O `dropWeaponReq` é flag no Player
+porque o slot de arma vive no `main.cpp`.
+
+**Não implementado:** transformação/LouisEX ·
 agarrão (cpoint) · Davis Leap Attack (D+^+J+A, 4 inputs) · custo de HP de alguns
 especiais · `stage.dat` (waves/spawns/bosses — o `bg.dat` já é lido, falta a fase) ·
 DoP com frame longo (226) · `vrest` por atacante (hoje timer único) ·
@@ -120,7 +150,60 @@ Forest); para trocar de fase em runtime, torná-los runtime a partir de
 `bg.width`/`zboundary`. Assets são flat em `assets/` (nomes colidem entre fases;
 subdirs por fase quando habilitar as outras). Teste: `tests/test_bg.cpp`.
 
+## 6b. Auditoria contra as 3 fontes (2026-07-29) — OpenLF2 é a melhor fonte de colisão
+
+`git clone --depth 1 https://github.com/xsoameix/openlf2` no HOME da sandbox
+(não no mount). `src/class_global.c` é a rotina de colisão do binário e
+**confirmou literalmente** nossa âncora (`left = x - centerx + box.x`, mirror por
+facing, `top = y - centery + box.y`), a banda de z (`zwidth==0 → 15`,
+`abs(dz) < zwidth`) e o anti-juggle. `src/const.c` dá as **tabelas de constantes**
+que faltavam.
+
+**Tabela de `itr kind` (OpenLF2 const.c:119-133)** — 0 normal_attack ·
+1 catch_injured · 2 pick_up_weapon · 3 catch · 4 thrown · 5 strength_list ·
+6 super_punch · 7 rowing_pick · 8 heal · 9 forcefield · 10 flute · 11 float ·
+14 **stop** · 15 fly · 16 freeze.
+
+Achados aplicados nesta auditoria:
+- **`vrest == 0` = ataque de ALVO ÚNICO** (class_global.c:204-230): o original
+  compara `abs(attacker->x - injured->x)` e guarda só o mais próximo. Nós
+  acertávamos todos os inimigos sobrepostos com um soco. CORRIGIDO.
+- **`itr` que causa dano**: aceita `kind != 1,2,7` (class_global.c:268). Censo dos
+  67 `.dat` por `injury`: kind 6 tem **0 de 162 com injury** (é marcador de frame
+  vulnerável em `broken_defend` 112-114 e `injured` 226-229 — ignorar está certo);
+  kind 4 (thrown, 286 com injury) depende de `thrown_injury` do arremessador, que
+  só um cpoint seta → inerte por ora. Passamos a aceitar **10 (flute) e 11 (float)**
+  — Henry — e **15/16** (freeze_column). 8 (heal) e 9 (forcefield) ficam fora de
+  propósito: o efeito deles não é dano.
+- **flute/float ignoram o anti-juggle** (class_global.c:178-181). Aplicado.
+- **Reação a hit é escalonada em 4 faixas de FP** (F.LF character.js:1676-1686):
+  `<=20` → 220 · `21-30` → 222 · `31-40` → 224 · `41-60` → **226** (Dance of Pain,
+  **state 16**, wait 6). Usávamos sempre 220. CORRIGIDO — e o 226 é o único estado
+  em que um `itr kind 1` pode agarrar (OpenLF2 const.c:102), o que destrava o cpoint.
+- **Arma leve no chão não pode ser destruída de mão vazia** (class_global.c:235-242):
+  falha se a vítima está em `on_ground_state_1` (1004) e o atacante não é objeto
+  nem está armado. Pedra/caixa (2004) pode. CORRIGIDO.
+- `on_ground_state_1/2 = 1004/2004` confirma nossos frames de repouso 64/20.
+
+**Desvios conscientes (sem fonte, ou contra a fonte) — revisar quando houver dado:**
+| item | nosso | fonte diz |
+|---|---|---|
+| ~~`WEAPON_FLY_GRAVITY`~~ | **0.425 = 1.7/4** | RESOLVIDO pelo binário: o pool de constantes do `lf2.exe` traz 1.7 e suas frações — 1.133333 (@0x48368), 0.566667 (@0x48350), **0.425 (@0x48358)**, 0.17 (@0x48360). Achado varrendo doubles IEEE-754 no `.exe`, sem Ghidra. |
+| bloqueio `itr:14` | cancela o movimento | F.LF escala a 10% (a 10% ainda se atravessa a pedra) |
+| `LOOP_TTL` de efeito em laço | 3 s | original apaga por HP do objeto type 3 (`hit_a` decrementa 500 hp) — mecânica ainda não implementada |
+| flecha pousada | expira em 3 s | original mantém até ser destruída/coletada |
+| `arest` vs `vrest` | um timer só na vítima | são coisas distintas (atacante vs vítima) |
+| pickup de arma | raio de 60 px | original usa `itr kind 2` + estado 1004/2004 da arma |
+| quebra de guarda | `fall >= 60` | acúmulo de `bdefend` (recover -0.5/tick) |
+
 ## 7. Fontes de referência (ORDEM OBRIGATÓRIA — decisão do usuário)
+
+**LEIA `tools/BINARY_NOTES.md` ANTES de dizer "não consegui achar no binário".**
+O decomp tem um ponto cego: a saída C do Ghidra nunca mostra literal de float, só
+referencia o endereço. Constante numérica se acha varrendo o `.exe` por padrões
+IEEE-754 (foi assim que gravidade 1.7 @0x48348 e a gravidade de arma 0.425 = 1.7/4
+@0x48358 saíram do binário). E o OpenLF2 tem `include/*.h` com **offsets de struct
+anotados**, que decodificam a aritmética de offset crua do decomp.
 
 1. **`reference/decomp/lf2_decomp.c`** — decompilação PRÓPRIA do `lf2.exe` (611
    funções, Ghidra). **FONTE PRIMÁRIA. Sempre tentar aqui primeiro.**
@@ -189,7 +272,9 @@ padding `int3` (sem o filtro, inflava para 2180 com 1573 stubs `swi(3)`).
 2. ✅ **bg.dat data-driven** (feito). Falta `stage.dat` (waves, spawns, bosses) e
    tornar `MAP_W`/`Z_MIN`/`Z_MAX` runtime para habilitar as outras 8 fases.
 3. **Agarrão** (cpoint) e catch/throw.
-4. **Códigos `next` 1000+** via decomp (LouisEX, teleporte).
+4. ✅ **Códigos `next` especiais** (feito: 1280 disappear + next negativo).
+   Resta a **transformação** (Louis→LouisEX, Rudolf copiando o oponente), que é
+   trocar o `.dat` do lutador em runtime.
 5. Polish: DoP frame 226, hitstop 3, `vrest` por atacante, `bdefend` acumulado.
 6. Davis Leap Attack (4-input) e combos raros.
 7. (Fora deste repo) Remaster como projeto separado.

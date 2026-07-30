@@ -230,8 +230,11 @@ int main() {
     // A single fall-60 hit is FP 60 — NOT over 60 — so it staggers, doesn't fall.
     reset();
     p.hit(40, -10.f, /*fall=*/60);
-    CHECK(!p.knockedDown && p.state() == lf2::ST_INJURED,
-          "single fall-60 stays up (FP 60 is not > 60)");
+    // FP 60 is over the DoP threshold (40), so the reaction is the LONG stun,
+    // frame 226 / state 16 — not the brief 220 flinch (F.LF character.js:1676).
+    CHECK(!p.knockedDown && p.state() == lf2::ST_INJURED2,
+          "single fall-60 stays up, in Dance of Pain (state 16)");
+    CHECK(p.f.frameId == lf2::fid::DANCE_OF_PAIN, "fp 41-60 picks frame 226");
     // A single fall-70 launcher (FP 70 > 60) knocks down at once.
     reset();
     p.hit(40, -10.f, /*fall=*/70);
@@ -305,6 +308,110 @@ int main() {
         lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
         v.hit(50, -20.f, 70);
         CHECK(v.f.state() == lf2::ST_FALLING, "charged arrow (fall 70) fells in one hit");
+    }
+
+    // ── Special `next` codes above 999 ───────────────────────────────────────
+    // Only three exist in the whole data set: 1000 (remove, covered by
+    // test_object), 1280 and a negative next.
+    {
+        // next: 1280 — Rudolf's "disappear" (hit_Uj 250 → … → 257). The fighter
+        // goes back to standing AND turns invisible + untouchable for ~150 ticks
+        // (F.LF hides sprite/shadow and sets effect.super).
+        dat::File rudolf = dat::load("data/rudolf.dat");
+        if (!rudolf.frames.empty()) {
+            lf2::Player p; p.load(&rudolf);
+            p.x = 400.f; p.z = 400.f; p.syncAnchor();
+            p.f.mp = p.f.maxMp;
+            p.f.setFrame(250);
+            int appeared = -1, vanishedAt = -1, damage = 0;
+            for (int t = 0; t < 260; ++t) {
+                p.tick(0,0,0,0,false,false);
+                if (p.hidden() && vanishedAt < 0) vanishedAt = t;
+                if (vanishedAt >= 0 && !p.hidden() && appeared < 0) appeared = t;
+                if (p.hidden()) damage += p.hit(100, -5.f, 70);
+            }
+            CHECK(vanishedAt >= 0, "next 1280 makes the fighter vanish");
+            CHECK(damage == 0, "a vanished fighter cannot be damaged (effect.super)");
+            CHECK(appeared > vanishedAt, "the fighter comes back on its own");
+            CHECK(appeared - vanishedAt > 120 && appeared - vanishedAt < 180,
+                  "vanish lasts about 150 ticks (5 s)");
+            CHECK(p.f.hp == p.f.maxHp, "no damage got through while hidden");
+        }
+    }
+    {
+        // A NEGATIVE next means "go to |next| and flip the facing" (F.LF
+        // switch_dir_after_trans). Louis's c-throw, frame 270, next -999: he
+        // turns around as he hurls the victim behind him.
+        dat::File louis = dat::load("data/louis.dat");
+        if (!louis.frames.empty()) {
+            const dat::Frame* fr = louis.frame(270);
+            CHECK(fr && fr->next == -999, "louis frame 270 really carries next -999");
+            lf2::Player p; p.load(&louis);
+            p.x = 400.f; p.z = 400.f; p.right = true; p.syncAnchor();
+            p.f.setFrame(270);
+            bool before = p.right;
+            for (int t = 0; t < 10; ++t) p.tick(0,0,0,0,false,false);
+            CHECK(p.right != before, "negative next flips the facing");
+            CHECK(p.f.frameId == lf2::fid::STANDING, "…and still lands on |999| = standing");
+        }
+    }
+
+    // ── itr `effect`: fire and ice (OpenLF2 const.c:135-146) ─────────────────
+    // 450 itrs in the data carry an effect and it used to be ignored entirely.
+    {
+        lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
+        v.hit(30, -2.f, 20, /*effect=*/3);          // freeze
+        CHECK(v.f.frameId == lf2::fid::ICE, "effect 3 freezes the victim (frame 200)");
+        // 200 (wait 2) → 201 is state 13 and waits 90 ticks = 3 s frozen.
+        for (int i = 0; i < 5; ++i) v.tick(0,0,0,0,false,false);
+        CHECK(v.state() == lf2::ST_ICE, "the ice chain parks in state 13");
+        int t = 0;
+        while (v.state() == lf2::ST_ICE && t++ < 200) v.tick(0,0,0,0,false,false);
+        CHECK(t > 60 && t < 130, "the freeze lasts about 90 ticks (3 s)");
+    }
+    {
+        lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
+        v.hit(30, -2.f, 20, /*effect=*/2);          // fire
+        CHECK(v.f.frameId == lf2::fid::BURNING, "effect 2 sets the victim on fire (203)");
+        CHECK(v.state() == lf2::ST_BURNING,     "burning is state 18");
+        CHECK(v.dropWeaponReq, "fire makes the victim drop a held weapon");
+        // The 203/204 pair loops forever in the data: the burn timer is what ends it.
+        for (int i = 0; i < lf2::Player::BURN_TICKS + 2; ++i) v.tick(0,0,0,0,false,false);
+        CHECK(v.state() != lf2::ST_BURNING, "the burn ends instead of looping forever");
+        // Weak fire must not restart the animation on someone already burning.
+        lf2::Player w; w.load(&dennis); w.x = 400.f; w.z = 400.f; w.syncAnchor();
+        w.hit(10, -2.f, 20, 2);
+        w.dropWeaponReq = false;
+        w.hit(10, -2.f, 20, 20);
+        CHECK(!w.dropWeaponReq, "effect 20 (weak fire) does not disarm a burning victim");
+    }
+
+    // ── Hardcoded per-character states must run their own frame chain ────────
+    // Louis frame 93 is state 100 (wait 90, dvx 23): a charge. airborneTick only
+    // let states 3/15 animate, so the generic jump pose overwrote it — the move
+    // started, froze mid-way and ended. Same trap would hit deep (301),
+    // woody (400/401) and rudolf (500/501).
+    {
+        dat::File louis = dat::load("data/louis.dat");
+        if (!louis.frames.empty()) {
+            const dat::Frame* f93 = louis.frame(93);
+            CHECK(f93 && f93->state == 100, "louis frame 93 really is state 100");
+            lf2::Player p2; p2.load(&louis);
+            p2.x = 400.f; p2.z = 400.f; p2.right = true; p2.syncAnchor();
+            p2.f.setFrame(lf2::fid::RUNNING, false);
+            p2.tick(0,1,0,0, false, true);                  // run + jump = dash
+            p2.tick(0,0,0,0, true,  false);                  // attack in the air
+            CHECK(p2.f.frameId == lf2::fid::DASH_ATTACK, "run+jump+attack enters 90");
+            float sx = p2.x;
+            int inCharge = 0;
+            for (int t = 0; t < 140; ++t) {
+                p2.tick(0,0,0,0,false,false);
+                if (p2.f.state() == 100) ++inCharge;
+            }
+            CHECK(inCharge > 10, "the state-100 charge actually runs (not overwritten)");
+            CHECK(p2.x - sx > 200.f, "the charge carries Louis forward a long way");
+            CHECK(p2.f.state() != 100, "and it exits instead of holding the frame for 3 s");
+        }
     }
 
     if (g_fail) { std::printf("\n%d CHECK(S) FAILED\n", g_fail); return 1; }

@@ -25,12 +25,15 @@ constexpr float WALK_SPEED  = 5.0f;
 constexpr float WALK_SPEEDZ = 2.5f;
 constexpr float GRAVITY     = 1.7f;   // LF2's per-tick gravity (community-documented)
 // Gravity for a WEAPON in flight (thrown / opoint-launched arrows & shuriken).
-// CALIBRATED against F.LF running the same shot: Henry fires from x≈700 and the
-// arrow comes to rest at x≈275 (~425 px). With dvx 22 that's ~19 ticks, and
-// solving 22 = -3t + g·t²/2 gives g ≈ 0.45. (Full 1.7 lands it in ~7 ticks/130 px;
-// 0.25 overshot to ~660 px.) Note 1.7/4 ≈ 0.43 — the original likely steps object
-// physics on a coarser time unit. Revisit if the binary yields the real value.
-constexpr float WEAPON_FLY_GRAVITY = 0.45f;
+// FROM THE BINARY: lf2.exe's floating-point constant pool holds 1.7 together with
+// its own fractions — 1.133333 (×2/3) @0x48368, 0.566667 (/3) @0x48350,
+// **0.425 (/4) @0x48358** and 0.17 (/10) @0x48360. So the original really does run
+// some objects on a reduced gravity, and /4 is the value that matches a thrown
+// weapon's arc. (Found by scanning lf2.exe for IEEE-754 doubles: Ghidra's C output
+// never shows float literals, it only references their address.)
+// This replaced 0.45, which had been calibrated by eye against an F.LF screenshot
+// and happened to land within 6% of the real constant.
+constexpr float WEAPON_FLY_GRAVITY = 0.425f;   // = 1.7 / 4, lf2.exe @0x48358
 // Ground friction applied to a grounded fighter's vx each tick, and the speed
 // below which it snaps to zero (F.LF: ps.fric = 1, GC.min_speed = 1).
 constexpr float FRICTION  = 1.0f;

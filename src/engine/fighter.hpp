@@ -25,6 +25,7 @@ namespace lf2 {
 // ── Frame-graph sentinels (observed in the original data) ────────────────────
 constexpr int NEXT_STANDING  = 999;   // `next: 999` → return to standing frame
 constexpr int NEXT_REMOVE    = 1000;  // `next: 1000` → remove the object (balls)
+constexpr int NEXT_DISAPPEAR = 1280;  // `next: 1280` → vanish (Rudolf's disappear)
 constexpr int STANDING_FRAME = 0;     // characters' standing frame id
 
 // Frame dv* semantics (as told apart in the real files):
@@ -53,6 +54,12 @@ enum State {
     ST_ICE        = 13,
     ST_LYING      = 14,
     ST_SPECIAL    = 15,  // throws / super moves / misc scripted frames
+    ST_BURNING    = 18,  // on fire (frames 203-206). Loops in the data; the exit
+                         // is external (F.LF locks it for 36 TU, then the victim
+                         // collapses — state 18 delegates to falling on landing).
+    ST_INJURED2   = 16,  // Dance of Pain (frames 226-229): the long stun, and the
+                         // ONLY state an itr kind 1 (catch_injured) may grab
+                         // (OpenLF2 const.c:102 injured_state_2 = 16).
 };
 
 // World-space axis-aligned box (float so it composes with sub-pixel motion).
@@ -79,6 +86,11 @@ struct Fighter {
     int   frameId = STANDING_FRAME;
     int   timer   = 0;    // ticks elapsed on the current frame (see advance())
     bool  removed = false; // hit a `next: 1000` — objects despawn, actors reset
+    bool  vanishReq = false; // hit a `next: 1280` — the owner should turn invisible
+    bool  flipReq   = false; // hit a negative `next` — the owner should turn around.
+                             // A character's facing lives on the controller and is
+                             // pushed into the Fighter by syncAnchor() every tick,
+                             // so flipping only facingRight here would be undone.
 
     // Vitals (LF2 characters are all 500 HP/MP unless a file overrides them).
     int   hp = 0, mp = 0, maxHp = 0, maxMp = 0;
@@ -130,15 +142,28 @@ struct Fighter {
         }
     }
 
-    // Follow the current frame's `next` link (999 → standing; 1000 → removed;
-    // dangling → standing).
+    // Follow the current frame's `next` link.
+    //   999   → standing
+    //   1000  → removed (objects despawn)
+    //   1280  → "disappear": go to standing AND vanish (Rudolf frame 257). The
+    //           owner turns invisible and untouchable for a while; F.LF hides the
+    //           sprite and the shadow and sets effect.super, clearing it ~150 TU
+    //           later with a blink.
+    //   < 0   → go to |next| and FLIP the facing afterwards (F.LF
+    //           switch_dir_after_trans). Louis's c-throw (frame 270, next -999)
+    //           turns him around as he hurls the victim behind him.
+    //   dangling → standing
     void gotoNext() {
         const dat::Frame* f = cur();
         if (!f) { setFrame(STANDING_FRAME); return; }
         int nx = f->next;
-        if (nx == NEXT_STANDING) { setFrame(STANDING_FRAME); return; }
-        if (nx == NEXT_REMOVE)   { removed = true; return; }
-        setFrame(nx);   // setFrame() already tolerates a missing id
+        bool flip = false;
+        if (nx < 0) { flip = true; nx = -nx; }
+        if (nx == NEXT_REMOVE) { removed = true; return; }
+        if (nx == NEXT_DISAPPEAR) { vanishReq = true; nx = NEXT_STANDING; }
+        if (nx == NEXT_STANDING) setFrame(STANDING_FRAME);
+        else                     setFrame(nx);   // tolerates a missing id
+        if (flip) { facingRight = !facingRight; flipReq = true; }
     }
 
     // Advance one 30 Hz logic tick.

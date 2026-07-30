@@ -46,6 +46,15 @@ namespace fid {
     constexpr int DEFEND   = 110;  // 110-111
     constexpr int BROKEN_DEF = 112;// 112-114
     constexpr int INJURED  = 220;  // 220-221 light stagger → standing (999)
+    // Hit reaction is tiered by falling points (F.LF character.js:1676-1686):
+    // 220 (fp<=20) · 222 (21-30) · 224 (31-40) · 226 (41-60) = Dance of Pain,
+    // state 16, the long stun and the only grabbable state.
+    constexpr int DANCE_OF_PAIN = 226;
+    // Hit-effect victim reactions (itr `effect`), canonical in every character:
+    //   200 → 201 (state 13, wait 90 = 3 s frozen) → 202 → 182 falling
+    //   203 ↔ 204 / 205 ↔ 206 (state 18) burning; loops, exit is external
+    constexpr int ICE      = 200;
+    constexpr int BURNING  = 203;
     constexpr int FALLING  = 180;  // 180-191 knockdown, engine picks by velocity
     constexpr int LYING    = 230;  // 230-231, next:219 (auto get-up) if alive
 }
@@ -92,6 +101,25 @@ struct Player {
     // punch, run/air attack, special). main.cpp uses it to re-arm per-swing hit
     // gates — without it, chained punches after the first never connect.
     int   swingId = 0;
+
+    // `next: 1280` (Rudolf's disappear): hidden AND untouchable while this runs
+    // down. F.LF counts up to 150 TU with effect.super set, hiding sprite and
+    // shadow, blinking the shadow over the last 30 before the body returns.
+    static constexpr int VANISH_TICKS = 150;
+    static constexpr int VANISH_BLINK = 30;    // final ticks: shadow blinks back
+    int   vanish = 0;
+    // Fire (itr effect 2/20/21/22/23): F.LF locks frame 203 for 36 TU, then the
+    // burning victim collapses. Ice needs no timer — frame 201's wait 90 is the
+    // 3 s freeze and the chain falls out on its own.
+    static constexpr int BURN_TICKS = 36;
+    int   burn = 0;
+    // Fire and ice both make you DROP a held weapon (F.LF drop_weapon in the
+    // effect switch) — except effect 20, the "weak fire" burn. main.cpp owns the
+    // weapon slot, so it consumes this flag.
+    bool  dropWeaponReq = false;
+    bool  hidden()       const { return vanish > 0; }
+    bool  untouchable()  const { return vanish > 0; }
+    bool  shadowBlink()  const { return vanish > 0 && vanish <= VANISH_BLINK; }
     bool  comboQueued = false;                 // atk pressed during a punch → chain at its end
     int   heldWeapon  = -1;    // object-pool index of a held weapon, or -1
     bool  heavyWeapon = false; // the held weapon is type 2 (stone/box)
@@ -186,6 +214,13 @@ struct Player {
         if (fp > 0) { fpAcc += 45; while (fpAcc >= 100 && fp > 0) { fpAcc -= 100; --fp; } }
         if ((++mpRegenAcc & 1) == 0 && f.mp < f.maxMp) ++f.mp;   // ~15 MP/s regen
         if (f.removed) { f.removed = false; f.setFrame(fid::STANDING); }   // 1000-code safety
+        if (f.vanishReq) { f.vanishReq = false; vanish = VANISH_TICKS; }    // next: 1280
+        if (f.flipReq)   { f.flipReq = false; right = !right; }              // next < 0
+        if (vanish > 0) --vanish;
+        if (burn > 0 && --burn == 0 && f.state() == ST_BURNING) {
+            f.setFrame(fid::FALLING);      // the burn ends with the victim down
+            knockedDown = true;
+        }
 
         // GROUND FRICTION (F.LF mechanics.dynamics: ps.fric = 1 per tick while
         // ps.y === 0, snapped to 0 below GC.min_speed = 1).
@@ -333,6 +368,13 @@ struct Player {
             int  before   = f.frameId;
             x += f.vx;
             clampPos();
+            // A scripted charge (Louis frame 93: state 100, wait 90, dvx 23) is
+            // capped by a very long `wait`; the real move ends when it runs out of
+            // speed. Without this it kept the frame for the full 3 s, standing
+            // still — so follow `next` (216, the dash recovery) as soon as friction
+            // has eaten the charge. INFERENCE: state 100 is emulated by neither
+            // OpenLF2 nor F.LF, so there is no reference for its exit condition.
+            if (scriptedState(f.state()) && fabsf(f.vx) < MIN_SPEED) { f.gotoNext(); return; }
             f.advance();
 
             // MP-drain frames (mp < 0, e.g. c_foot's -17): entering one costs
@@ -399,6 +441,17 @@ struct Player {
     }
     bool inPunch() const { return f.frameId >= fid::PUNCH && f.frameId <= fid::PUNCH2 + 3; }
 
+    // A per-character HARDCODED state: the original engine has bespoke code for
+    // these, and the .dat frames rely on it. Census of the 67 files:
+    //   100      louis / louisEX  frame 93  dash_attack (wait 90, dvx 23 charge)
+    //   301      deep             290-294   dash_sword (20 frames)
+    //   400/401  woody            283/298   teleport
+    //   500/501  rudolf           295/298   transform
+    // We do not emulate what each one MEANS yet, but they must at least be
+    // allowed to run their own frame chain instead of being overwritten by the
+    // generic jump/dash pose — that is what broke Louis's run-jump-attack.
+    static bool scriptedState(int s) { return s >= 100; }
+
     // ── Airborne integration (jump + knockdown) ──────────────────────────────
     // Physics take over whenever off the ground, INDEPENDENT of the animation
     // state — jump frames can cycle to standing (next:999) mid-arc, so grounding
@@ -413,18 +466,24 @@ struct Player {
         }
         clampPos();
         if (grounded()) {                       // landed this tick
-            h = 0.f; vy = 0.f; f.vx = 0.f;
+            h = 0.f; vy = 0.f;
             // Landing ends an air attack (faithful to LF2/F.LF: touching the
             // ground snaps you out of the swing — do NOT let it finish airborne).
+            // A SCRIPTED state is the exception: Louis's frame 93 is state 100,
+            // wait 90, dvx 23 — a charge that is supposed to keep travelling and
+            // exit through its own `next` (216). Cutting it on landing is what
+            // made the move "start, freeze mid-way and end".
+            if (scriptedState(f.state())) { f.advance(); return; }
+            f.vx = 0.f;
             f.setFrame(knockedDown ? fid::LYING : fid::STANDING);
             return;
         }
         if (knockedDown) return;                // a knockdown holds its falling frame
 
         int s = f.state();
-        // Already mid air-attack (jump_attack = state 3, dash_attack = state 15):
-        // let its frames play out.
-        if (s == ST_ATTACK || s == ST_SPECIAL) { f.advance(); return; }
+        // Already mid air-attack (jump_attack = state 3, dash_attack = state 15)
+        // or in a hardcoded per-character state: let the frame graph play out.
+        if (s == ST_ATTACK || s == ST_SPECIAL || scriptedState(s)) { f.advance(); return; }
         // Attack pressed in the air → throw a held weapon, else jump/dash attack.
         if (atk) {
             if (throwHeldIfArmed()) return;
@@ -520,7 +579,19 @@ struct Player {
     //  • Light hit  → injured stagger (220 → 221 → standing).
     //  • Heavy/fatal → knockdown: launch into falling (180), land into lying;
     //    if HP hit 0 the actor stays down (dead), otherwise it gets back up.
-    int hit(int dmg, float kbx, int itrFall) {
+    // Hit-effect families (OpenLF2 const.c:135-146 + F.LF character.js:1721-1732).
+    //   2, 21, 22, 23 → burn AND drop the held weapon
+    //   20            → burn ("weak fire"), keeps the weapon
+    //   3, 30         → freeze AND drop the weapon
+    //   0 punch · 1 bleed · 4 shrafe → no state change, visual only
+    static bool effectIsFire(int e)  { return e == 2 || (e >= 20 && e <= 23); }
+    static bool effectIsIce(int e)   { return e == 3 || e == 30; }
+    static bool effectDropsWeapon(int e) { return effectIsIce(e) || (effectIsFire(e) && e != 20); }
+
+    int hit(int dmg, float kbx, int itrFall, int effect = 0) {
+        // Vanished (next: 1280) = F.LF's effect.super: the bdy is skipped
+        // entirely, so nothing can touch you until you reappear.
+        if (untouchable()) return 0;
         if (itrFall < 0) itrFall = 20;                // default fall for unset itr
         bool heavyBlow    = itrFall >= 60;            // guard-breaking / instant fall
         bool blockedFront = isDefending() &&
@@ -537,6 +608,30 @@ struct Player {
         int lost = before - f.hp;
 
         if (blockedFront && heavyBlow) { f.setFrame(fid::BROKEN_DEF); return lost; }
+
+        // ── itr `effect`: fire and ice override the normal reaction ───────────
+        // 450 itrs in the data carry a non-zero effect, and it was ignored
+        // entirely — Firen's fire and Freeze's ice landed as plain damage.
+        if (effectIsIce(effect)) {
+            if (effectDropsWeapon(effect)) dropWeaponReq = true;
+            if (f.state() != ST_ICE) {          // already frozen: don't restart
+                fp = 0; burn = 0; knockedDown = false;
+                f.vx = 0.f; h = 0.f; vy = 0.f;
+                f.setFrame(fid::ICE);           // 200 → 201 (3 s) → 202 → falling
+            }
+            return lost;
+        }
+        if (effectIsFire(effect)) {
+            if (effectDropsWeapon(effect)) dropWeaponReq = true;
+            // Already burning? F.LF: a burning victim is IMMUNE to the weak fire
+            // effects 20/21, so they must not restart the animation.
+            if (f.state() == ST_BURNING && (effect == 20 || effect == 21)) return lost;
+            fp = 0;
+            f.vx = 0.f;
+            f.setFrame(fid::BURNING);           // 203, locked for BURN_TICKS
+            burn = BURN_TICKS;
+            return lost;
+        }
 
         // Falling Points: each hit adds its `fall`. Over 60 (or death) → knocked
         // down; otherwise stay up and keep taking hits (a flurry accumulates FP
@@ -556,10 +651,20 @@ struct Player {
             float lv = juggle ? 0.f : std::fabs(kbx);
             if (!juggle && lv < 6.f) lv = 6.f;
             f.vx = (kbx < 0.f ? -lv : lv);
-        } else {                                      // injured / Dance of Pain
-            // FP>40 = the longer DoP stun; below, a brief flinch. Both use the
-            // injured frames (220→221→standing); DoP's extra length is a refinement.
-            f.setFrame(fid::INJURED);
+        } else {
+            // The reaction frame is picked by the ACCUMULATED falling points, in
+            // four tiers — not one generic flinch (F.LF character.js:1676-1686):
+            //     fp <= 20 → 220     fp 21..30 → 222
+            //     fp 31..40 → 224    fp 41..60 → 226  (Dance of Pain, state 16)
+            // 226 is the long stun (wait 6 vs 2) and it is also the only state an
+            // itr kind 1 can grab (OpenLF2: catch_injured requires injured_state_2
+            // == 16), so getting the tier right is what will make catches work.
+            int react = fid::INJURED;                 // 220
+            if      (fp > FP_DOP) react = fid::DANCE_OF_PAIN;   // 226
+            else if (fp > 30)     react = fid::INJURED + 4;     // 224
+            else if (fp > 20)     react = fid::INJURED + 2;     // 222
+            if (!f.data || !f.data->frame(react)) react = fid::INJURED;
+            f.setFrame(react);
             x += kbx; clampPos();                     // dvx-sized nudge (a few px)
         }
         return lost;

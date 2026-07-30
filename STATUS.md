@@ -1,3 +1,35 @@
+# LF2 Vita — Estado da sessão (2026-07-29)
+
+## LIÇÃO DA SESSÃO — ler o binário direto (ver tools/BINARY_NOTES.md)
+
+Ghidra não mostra literal de float: só referencia o endereço. Por isso a gravidade
+ficou tempo demais documentada como "F.LF/comunidade". Varrendo o `lf2.exe` por
+doubles IEEE-754: **1.7 @0x48348** (única ocorrência) e o pool com suas frações —
+**0.425 = 1.7/4 @0x48358**, que é a gravidade de arma em voo e substituiu o 0.45
+que eu havia inventado calibrando por captura de tela. O pool `0x479xx-0x483xx`
+tem também ±17/±16/±14/±13/±2.4/0.85/1.2/1.4, provavelmente knockback e faixas de
+tombo — atacar hitstop/bdefend/tombo daí, não do F.LF.
+OpenLF2 é pedra de roseta: `include/*.h` traz structs com offsets anotados e ele
+nomeia endereços (`func_4171C0_is_itr_bdy_overlap`) que casam com os `FUN_` do
+nosso decomp. O decomp NÃO ficou obsoleto — é o único que mostra lógica.
+
+## Sessão 2026-07-29 — códigos `next` especiais + ferramental
+
+Levantei TODOS os `next` fora do comum nos 67 `.dat`: existem só **três**, não a
+família 1000+ que o HANDOFF supunha. `1000` (remove, já feito), **`1280`**
+(disappear do Rudolf) e **`next` negativo** (c-throw do Louis). Ambos implementados
+e cobertos por teste. Fonte: F.LF `character.js` (state1280_disappear),
+`livingobject.js` (switch_dir_after_trans) e `global.js` (GC.effect.disappear).
+Armadilha: o facing do personagem vive no controlador e o `syncAnchor()` sobrescreve
+o do Fighter todo tick — por isso o Fighter só sinaliza `flipReq`.
+
+Ferramental novo desta sessão: harness headless (`make -f Makefile.host harness`)
+que roda o `main.cpp` real sem tela com entrada roteirizada; compile-check contra
+os headers REAIS do SDL2 (`tools/host_sdl.sh` + alvo `check-main`), no lugar dos
+stubs ABI; modo auditoria no SELECT; `REVIEW_PROMPT.md` para instância revisora.
+
+---
+
 # LF2 Vita — Estado da sessão (2026-07-25c)
 
 ## Sessão 2026-07-25c — Bugs de armas (reteste no device)

@@ -153,16 +153,56 @@ static inline Box toBox(const lf2::WBox& w) {
 struct HitInfo {
     Box box;
     int injury = 20, fall = -1, dvx = 0, rest = 8, zwidth = 15;
+    int kind = 0;          // itr kind that produced this hit (see itrDeals)
+    int effect = 0;        // itr `effect`: fire / ice / bleed (see Player::hit)
+    // OpenLF2 class_global.c:204-230: an itr with vrest == 0 is SINGLE TARGET —
+    // the original compares abs(attacker->x - injured->x) across candidates and
+    // keeps only the closest one (attackable_distance / successful_attacks = 1).
+    // Only vrest > 0 accumulates several victims in one tick. We used to damage
+    // every overlapping enemy, so one punch could hit a whole stack.
+    bool singleTarget = true;
 };
+// Which itr kinds actually deal damage. OpenLF2 (class_global.c:268) says every
+// kind EXCEPT 1 (catch_injured), 2 (pick_up_weapon) and 7 (rowing_pick) counts as
+// a successful attack — but "successful" only means the hit registers; the damage
+// payload still comes from the itr, and a census of the 67 .dat files shows which
+// kinds carry one:
+//    0  normal_attack   876 with injury   → damage (was the only one we accepted)
+//    4  thrown          286 with injury   → gated on the attacker's thrown_injury
+//                                           (OpenLF2:255), which only a cpoint
+//                                           throw sets — inert until throws exist
+//    5  strength_list   235 with injury   → weapons, handled separately
+//    6  super_punch       0 with injury   → NOT an attack: it marks vulnerable
+//                                           frames (broken_defend 112-114,
+//                                           injured 226-229). Ignoring it is right.
+//    8  heal              5               → john_ball; heals, must not damage
+//    9  forcefield        6               → john_ball; own effect
+//   10  flute            15 with injury   → Henry, IN OUR ROSTER
+//   11  float             5 with injury   → Henry, IN OUR ROSTER
+//   15  fly               5 with injury   → freeze_column (Freeze is in the roster)
+//   16  freeze            1 with injury   → freeze_column
+//    1/2/3/7/14           0 with injury   → catch / pickup / stop, never damage
+static inline bool itrDeals(int kind) {
+    return kind == 0 || kind == 10 || kind == 11 || kind == 15 || kind == 16;
+}
+// OpenLF2 class_global.c:178-181 — the anti-juggle rule spares two kinds: flute
+// and float still connect with a victim who is already falling.
+static inline bool itrIgnoresAntiJuggle(int kind) {
+    return kind == 10 || kind == 11;
+}
+
 static bool fighterAttack(const lf2::Fighter& f, HitInfo& out) {
     bool found = false;
     f.forEachItr([&](const lf2::WBox& wb, const dat::Itr& it) {
-        if (it.kind == 0 && !found) {
+        if (itrDeals(it.kind) && !found) {
+            out.kind = it.kind;
             out.box    = toBox(wb);
             out.injury = it.injury > 0 ? it.injury : 20;
             out.fall   = it.fall;
             out.dvx    = it.dvx;
             out.rest   = it.vrest > 0 ? it.vrest : (it.arest > 0 ? it.arest : 8);
+            out.singleTarget = (it.vrest == 0);
+            out.effect = it.effect;
             // OpenLF2 (decompiled): z-band = itr->zwidth, default 15 when 0/unset;
             // hit requires abs(dz) < zwidth. Whirlwind moves set a wide zwidth.
             out.zwidth = it.zwidth > 0 ? it.zwidth : 15;
@@ -181,7 +221,8 @@ static bool fighterBody(const lf2::Fighter& f, Box& out) {
 
 // An attack box also hurts WEAPONS. Each weapon has <weapon_hp>; at 0 it breaks
 // (F.LF weapon.js 'die'), which spawns the broken-weapon effect, oid 999.
-static void damageObjects(const HitInfo& hi, bool fromRight, int skipIdx);
+static void damageObjects(const HitInfo& hi, bool fromRight, int skipIdx,
+                          bool attackerArmed);
 
 // Obstacle test: does any grounded object present an itr of kind 14 (LF2's
 // "blocking" box) where the player's body now is? Only weapon1.dat (stone) ships
@@ -414,11 +455,19 @@ static void spawnOpoints(const lf2::Fighter& f, int team) {
 
 // Apply an attack box to every weapon lying around: durability comes from the
 // weapon's own <weapon_hp>, and at 0 it shatters into broken_weapon.dat (oid 999).
-static void damageObjects(const HitInfo& hi, bool fromRight, int skipIdx) {
+static void damageObjects(const HitInfo& hi, bool fromRight, int skipIdx,
+                          bool attackerArmed) {
     for (int i = 0; i < g_objects.SIZE; i++) {
         if (i == skipIdx) continue;                 // never your own held weapon
         lf2::Object& o = g_objects.objs[i];
         if (!o.active || o.weaponType <= 0 || o.rehit > 0) continue;
+        // OpenLF2 class_global.c:235-242: an attack on a victim whose state is
+        // on_ground_state_1 (1004 — a LIGHT weapon lying down) fails unless the
+        // attacker is an object or is holding a weapon. So a bare fist cannot
+        // smash a knife on the floor, while a stone/box (state 2004) can be hit
+        // freely. We were letting punches break anything on the ground.
+        if (!attackerArmed && o.f.state() == lf2::weapon_state::LIGHT_ON_GROUND)
+            continue;
         bool hit = false;
         o.f.forEachBdy([&](const lf2::WBox& wb, const dat::Bdy&) {
             if (!hit && boxOverlap(hi.box, toBox(wb))) hit = true;
@@ -855,6 +904,20 @@ int main(int argc, char* argv[]) {
                 // frame offers a hold point (wpoint kind 1).
                 // Pick up: press ATTACK next to a grounded weapon (LF2 picks up
                 // on the attack input, not by walking over it).
+                // Fire/ice made the player drop what he was holding (F.LF
+                // drop_weapon in the effect switch). The Player only raises the
+                // flag; the slot lives here.
+                if (player.dropWeaponReq) {
+                    player.dropWeaponReq = false;
+                    if (player.heldWeapon >= 0) {
+                        lf2::Object& w = g_objects.objs[player.heldWeapon];
+                        if (w.active)
+                            w.dropAt(player.x + (player.right ? 30.f : -30.f),
+                                     player.z + player.h, player.z, player.right, player.z);
+                        player.heldWeapon = -1; player.heavyWeapon = false;
+                    }
+                }
+
                 // Running/dashing into an object is a RUNNING ATTACK, not a
                 // pickup — the run branch already picked its attack frame, so
                 // grabbing here would cancel it.
@@ -981,30 +1044,46 @@ int main(int argc, char* argv[]) {
                 // ── player attack → enemies ──────────────────────────────────
                 HitInfo hi;
                 if (fighterAttack(player.f, hi)) {
+                    // Collect every legal victim first. An itr with vrest == 0 is
+                    // single-target in the original (closest wins), so hitting the
+                    // whole overlapping stack with one punch was wrong.
+                    int  cand[NUM_ENEMIES], nCand = 0;
                     for (int i = 0; i < NUM_ENEMIES; i++) {
                         Box ebody;
                         Enemy& e = slots[i].e;
                         int es = e.a.f.state();
                         // OpenLF2 anti-juggle: a light hit (fall<=40) can't strike
                         // a victim already falling; a launcher (fall>40) still can.
-                        bool downed = (es == lf2::ST_FALLING && hi.fall <= 40) ||
-                                      es == lf2::ST_LYING;
-                        if (e.rehitTimer == 0 && e.alive() && !downed &&
+                        bool downed = ((es == lf2::ST_FALLING && hi.fall <= 40) ||
+                                       es == lf2::ST_LYING) &&
+                                      !itrIgnoresAntiJuggle(hi.kind);
+                        if (e.rehitTimer == 0 && e.alive() && !downed && !e.a.untouchable() &&
                             fabsf(player.z - e.a.z) < (float)hi.zwidth &&
                             fighterBody(e.a.f, ebody) && boxOverlap(hi.box, ebody))
-                        {
-                            e.rehitTimer = hi.rest;
-                            e.hitFlash   = 10;
-                            float kb = (float)(hi.dvx > 0 ? hi.dvx : 1);
-                            e.a.hit(hi.injury, player.right ? kb : -kb, hi.fall);
-#ifdef LF2_HEADLESS
-                            g_damageDealt += hi.injury;
-#endif
+                            cand[nCand++] = i;
+                    }
+                    if (hi.singleTarget && nCand > 1) {      // keep the closest only
+                        int best = cand[0];
+                        float bd = fabsf(player.x - slots[best].e.a.x);
+                        for (int c = 1; c < nCand; c++) {
+                            float d = fabsf(player.x - slots[cand[c]].e.a.x);
+                            if (d < bd) { bd = d; best = cand[c]; }
                         }
+                        cand[0] = best; nCand = 1;
+                    }
+                    for (int c = 0; c < nCand; c++) {
+                        Enemy& e = slots[cand[c]].e;
+                        e.rehitTimer = hi.rest;
+                        e.hitFlash   = 10;
+                        float kb = (float)(hi.dvx > 0 ? hi.dvx : 1);
+                        e.a.hit(hi.injury, player.right ? kb : -kb, hi.fall, hi.effect);
+#ifdef LF2_HEADLESS
+                        g_damageDealt += hi.injury;
+#endif
                     }
                     // …and the same swing damages WEAPONS lying around: they have
                     // <weapon_hp> durability (stone 800, knife 200) and break at 0.
-                    damageObjects(hi, player.right, player.heldWeapon);
+                    damageObjects(hi, player.right, player.heldWeapon, player.heldWeapon >= 0);
                 }
 
                 // ── held weapon's itr → enemies ──────────────────────────────
@@ -1033,7 +1112,7 @@ int main(int argc, char* argv[]) {
                         }
                     }
                     if (swinging) {
-                        damageObjects(whi, player.right, player.heldWeapon);
+                        damageObjects(whi, player.right, player.heldWeapon, /*attackerArmed=*/true);
                         for (int i = 0; i < NUM_ENEMIES; i++) {
                             Box ebody; Enemy& e = slots[i].e;
                             if (e.rehitTimer == 0 && e.alive() &&
@@ -1050,7 +1129,7 @@ int main(int argc, char* argv[]) {
 
                 // ── enemy attacks → player ───────────────────────────────────
                 Box pBody;
-                bool havePBody = player.alive() && fighterBody(player.f, pBody);
+                bool havePBody = player.alive() && !player.untouchable() && fighterBody(player.f, pBody);
                 if (havePBody) {
                     for (int i = 0; i < NUM_ENEMIES; i++) {
                         HitInfo ehi;
@@ -1061,7 +1140,7 @@ int main(int argc, char* argv[]) {
                         {
                             e.hasHitPlayer = true;
                             float kb = (float)(ehi.dvx > 0 ? ehi.dvx : 1);
-                            player.hit(ehi.injury, e.a.right ? kb : -kb, ehi.fall);
+                            player.hit(ehi.injury, e.a.right ? kb : -kb, ehi.fall, ehi.effect);
                         }
                     }
                 }
@@ -1088,14 +1167,15 @@ int main(int argc, char* argv[]) {
                             // were the only thing that damaged a downed fighter —
                             // which read as "only the balls and the wind hurt".
                             int es = e.a.f.state();
-                            bool downed = (es == lf2::ST_FALLING && ohi.fall <= 40) ||
-                                          es == lf2::ST_LYING;
-                            if (e.alive() && !downed &&
+                            bool downed = ((es == lf2::ST_FALLING && ohi.fall <= 40) ||
+                                           es == lf2::ST_LYING) &&
+                                          !itrIgnoresAntiJuggle(ohi.kind);
+                            if (e.alive() && !downed && !e.a.untouchable() &&
                                 fabsf(o.f.z - e.a.z) < (float)ohi.zwidth &&
                                 fighterBody(e.a.f, ebody) && boxOverlap(ohi.box, ebody))
                             {
                                 float kb = (float)(ohi.dvx > 0 ? ohi.dvx : 4);
-                                e.a.hit(ohi.injury, o.f.facingRight ? kb : -kb, ohi.fall);
+                                e.a.hit(ohi.injury, o.f.facingRight ? kb : -kb, ohi.fall, ohi.effect);
 #ifdef LF2_HEADLESS
                                 g_damageDealt += ohi.injury;
 #endif
@@ -1107,12 +1187,13 @@ int main(int argc, char* argv[]) {
                         }
                     } else if (havePBody) {                  // enemy ball → player
                         int ps2 = player.f.state();
-                        bool pDowned = (ps2 == lf2::ST_FALLING && ohi.fall <= 40) ||
-                                       ps2 == lf2::ST_LYING;
+                        bool pDowned = ((ps2 == lf2::ST_FALLING && ohi.fall <= 40) ||
+                                        ps2 == lf2::ST_LYING) &&
+                                       !itrIgnoresAntiJuggle(ohi.kind);
                         if (!pDowned &&
                             fabsf(o.f.z - player.z) < (float)ohi.zwidth && boxOverlap(ohi.box, pBody)) {
                             float kb = (float)(ohi.dvx > 0 ? ohi.dvx : 4);
-                            player.hit(ohi.injury, o.f.facingRight ? kb : -kb, ohi.fall);
+                            player.hit(ohi.injury, o.f.facingRight ? kb : -kb, ohi.fall, ohi.effect);
                             o.onHit();
                             o.rehit = ohi.rest;
                         }
@@ -1146,11 +1227,19 @@ int main(int argc, char* argv[]) {
             if (scene.shadow) {
                 const int shW = scene.bg.shadowW, shH = scene.bg.shadowH;
                 const int shOx = shW / 2;
-                SDL_Rect ps = { (int)player.x - camX - shOx, (int)player.z - shH/2, shW, shH };
-                SDL_RenderCopy(ren, scene.shadow, nullptr, &ps);
+                // A vanished fighter (next: 1280) hides sprite AND shadow; over
+                // the last few ticks the shadow blinks back as a tell.
+                bool pShadow = !player.hidden() ||
+                               (player.shadowBlink() && ((player.vanish / 2) % 2 == 0));
+                if (pShadow) {
+                    SDL_Rect ps = { (int)player.x - camX - shOx, (int)player.z - shH/2, shW, shH };
+                    SDL_RenderCopy(ren, scene.shadow, nullptr, &ps);
+                }
                 for (int i = 0; i < NUM_ENEMIES; i++) {
-                    SDL_Rect es = { (int)slots[i].e.a.x - camX - shOx,
-                                    (int)slots[i].e.a.z - shH/2, shW, shH };
+                    const lf2::Player& ea = slots[i].e.a;
+                    bool sh = !ea.hidden() || (ea.shadowBlink() && ((ea.vanish / 2) % 2 == 0));
+                    if (!sh) continue;
+                    SDL_Rect es = { (int)ea.x - camX - shOx, (int)ea.z - shH/2, shW, shH };
                     SDL_RenderCopy(ren, scene.shadow, nullptr, &es);
                 }
                 g_objects.forEach([&](lf2::Object& o) {
@@ -1175,9 +1264,11 @@ int main(int argc, char* argv[]) {
             }
             for (int i = 0; i < nDraw; i++) {
                 if (list[i].kind == 0) {
-                    drawFighter(ren, player.f, g_chars[playerIdx].sheets, camX);
+                    if (!player.hidden())
+                        drawFighter(ren, player.f, g_chars[playerIdx].sheets, camX);
                 } else if (list[i].kind == 1) {
                     EnemySlot& s = slots[list[i].idx];
+                    if (s.e.a.hidden()) continue;
                     bool flash = s.e.hitFlash > 0;
                     drawFighter(ren, s.e.a.f, g_chars[s.rosterIdx].sheets, camX,
                                 255, flash ? 80 : 255, flash ? 80 : 255);
