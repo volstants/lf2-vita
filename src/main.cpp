@@ -152,9 +152,15 @@ static inline Box toBox(const lf2::WBox& w) {
 
 struct HitInfo {
     Box box;
-    int injury = 20, fall = -1, dvx = 0, rest = 8, zwidth = 15;
+    int injury = 20, fall = -1, dvx = 0, zwidth = 15;
+    // `arest` e `vrest` NÃO são o mesmo temporizador e o engine os guarda em
+    // lugares de naturezas diferentes. Ver applyRest() abaixo.
+    int arest = 0;         // itr+0x20 — cooldown ESCALAR do atacante
+    int vrest = 0;         // itr+0x24 — cooldown POR PAR (atacante, vítima)
     int kind = 0;          // itr kind that produced this hit (see itrDeals)
     int effect = 0;        // itr `effect`: fire / ice / bleed (see Player::hit)
+    int attState = 0;      // the ATTACKER's frame state — the effect gate below
+                           // needs it (a burn_run attacker is treated apart).
     // OpenLF2 class_global.c:204-230: an itr with vrest == 0 is SINGLE TARGET —
     // the original compares abs(attacker->x - injured->x) across candidates and
     // keeps only the closest one (attackable_distance / successful_attacks = 1).
@@ -191,8 +197,41 @@ static inline bool itrIgnoresAntiJuggle(int kind) {
     return kind == 10 || kind == 11;
 }
 
+// Grava os dois temporizadores de re-acerto de um golpe que conectou.
+//
+// SOURCE: lf2.exe 0x0042f2c8-0x0042f31b (com o gêmeo em 0x004303a7-0x00430410).
+// O trecho, com `ecx` = itr, `ebx` = id do atacante, `edi` = id da vítima:
+//
+//     42f2d6:  mov  0x20(%ecx),%eax      ; itr->arest
+//     42f2d9:  cmp  $0x4,%eax
+//     42f2dc:  jge  0x42f2f7             ; arest >= 4 → usa o valor do itr
+//     42f2de:  cmpl $0x0,0x24(%ecx)      ; itr->vrest
+//     42f2e2:  jne  0x42f2f7
+//     42f2e4:  movl $0x4,0xec(%eax)      ; senão: atacante->arest = 4  (PISO)
+//     42f2f7:  mov  %eax,0xec(%edx)      ; atacante->arest = itr->arest
+//     42f304:  cmpl $0x0,0x24(%ecx)
+//     42f308:  jle  0x42f31b             ; vrest <= 0 → não grava nada por par
+//     42f314:  mov  %cl,0xf0(%eax,%ebx,1); vitima->vrest_of_objects[atacante]
+//
+// Três fatos que estavam errados aqui: (1) `arest` é escrito SEMPRE, mesmo
+// quando há `vrest`; (2) o piso é 4 e só se aplica quando `arest < 4` E
+// `vrest == 0` — o 8/9 que usávamos era invenção; (3) o `vrest` é gravado como
+// BYTE no array da VÍTIMA indexado pelo ATACANTE, não no atacante.
+// EM ABERTO — teto de 12: o sítio 2 satura o arest logo após gravá-lo
+// (`0x4303bb: mov $0xc,%edx` · `0x4303c0: cmp` · `0x4303c8: mov %edx,0xec(%eax)`).
+// O sítio 1 NÃO satura: de `0x0042f2fe` vai direto ao vrest em `0x0042f304`.
+// Os dois compartilham o mesmo piso de 4, então são caminhos irmãos, mas ainda
+// não isolei a condição que separa um do outro. 143 itrs do jogo usam arest, 51
+// deles com valor 15 — aplicar o teto sem saber a que ramo ele pertence mudaria
+// o comportamento de metade dos golpes com base em meia evidência. Fica de fora
+// até a condição estar reconstruída.
+static inline void applyRest(const HitInfo& hi, int& attackerArest, int& pairVrest) {
+    lf2::applyRest(hi.arest, hi.vrest, attackerArest, pairVrest);
+}
+
 static bool fighterAttack(const lf2::Fighter& f, HitInfo& out) {
     bool found = false;
+    out.attState = f.state();
     f.forEachItr([&](const lf2::WBox& wb, const dat::Itr& it) {
         if (itrDeals(it.kind) && !found) {
             out.kind = it.kind;
@@ -200,7 +239,8 @@ static bool fighterAttack(const lf2::Fighter& f, HitInfo& out) {
             out.injury = it.injury > 0 ? it.injury : 20;
             out.fall   = it.fall;
             out.dvx    = it.dvx;
-            out.rest   = it.vrest > 0 ? it.vrest : (it.arest > 0 ? it.arest : 8);
+            out.arest  = it.arest;
+            out.vrest  = it.vrest;
             out.singleTarget = (it.vrest == 0);
             out.effect = it.effect;
             // OpenLF2 (decompiled): z-band = itr->zwidth, default 15 when 0/unset;
@@ -231,7 +271,7 @@ static void damageObjects(const HitInfo& hi, bool fromRight, int skipIdx,
 // player's body box no longer overlaps the obstacle's ground-level box.
 template <int N>
 static bool blockedByObstacle(const lf2::Player& p, lf2::ObjectPool<N>& objs, int heldIdx,
-                              float* obstacleX = nullptr) {
+                              float* obstacleX = nullptr, float* obstacleZ = nullptr) {
     Box pb;
     if (!fighterBody(p.f, pb)) return false;
     bool blocked = false;
@@ -250,6 +290,7 @@ static bool blockedByObstacle(const lf2::Player& p, lf2::ObjectPool<N>& objs, in
             if (boxOverlap(toBox(wb), pb)) {
                 blocked = true;
                 if (obstacleX) *obstacleX = o.f.x;
+                if (obstacleZ) *obstacleZ = o.f.z;
             }
         });
         if (blocked) break;
@@ -415,6 +456,17 @@ static void spawnOpoints(const lf2::Fighter& f, int team) {
     if (!fr || fr->opoints.empty()) return;
     for (const dat::Opoint& op : fr->opoints) {
         if (op.kind != 1) continue;
+        // oid 5 is NOT an object. F.LF character.js:1969-1998 special-cases it
+        // BEFORE the create_object/create_multiple_objects split: it spawns
+        // `number_of_character = |facing| / 10` AI-controlled +man clones (20 HP,
+        // AIscript 4, parented to the caster), which is Rudolf's frame 271
+        // transform. data/data.txt:19 confirms `id: 5 type: 0 file:
+        // data\rudolf.dat` — a CHARACTER file, so routing it through the object
+        // pool builds a Fighter out of a character .dat and files it as a
+        // projectile. The multi-spawn work then made it TWO of them.
+        // We have no NPC spawning yet, so emit nothing rather than something
+        // wrong; this is the hook to fill in when roster spawning lands.
+        if (op.oid == 5) continue;
         ObjAssets* oa = objAssetsCached(op.oid);
         if (!oa) continue;
         // `facing` is NOT just a direction: it encodes COUNT * 10 + direction.
@@ -423,11 +475,24 @@ static void spawnOpoints(const lf2::Fighter& f, int team) {
         // henry frame 286 is literally named 5_arrow with facing 50, rudolf 288
         // throws 5 shuriken and his frame 271 (+man) spawns 2 clones with facing
         // 20. We were reading facing purely as a direction and emitting ONE.
-        int count = (op.facing >= 10 || op.facing <= -10) ? (abs(op.facing) / 10) : 1;
+        int count = (abs(op.facing) > 10) ? (abs(op.facing) / 10) : 1;
         int dir   = abs(op.facing) % 10;
         bool faceRight = (dir == 1) ? !f.facingRight : f.facingRight;
-        float spread = 3.f;   // F.LF passes `dvz || 3`; the parser has no dvz on Opoint
+        // F.LF passes `ops[i].dvz || 3`; the census of the 115 opoints across the
+        // 67 .dat files shows the sub-keys are exactly kind/x/y/action/dvx/dvy/
+        // oid/facing — there is no dvz anywhere, so the fallback always wins.
+        const float spread = 3.f;
+        const int   half   = count / 2;
         for (int n = 0; n < count; ++n) {
+            // vz_array, ported from F.LF match.js:316-353. The copies fan out by
+            // DEPTH VELOCITY and all leave the same point; a static z offset (what
+            // this used to do) puts them side by side at birth and then keeps them
+            // exactly parallel forever, so they never actually spread.
+            // t runs [-half, half], skipping 0 when `count` is even so the list
+            // still holds exactly `count` entries: 5 → -2..2, 4 → -2,-1,1,2.
+            int t = -half + n;
+            if ((count % 2) == 0 && t >= 0) ++t;      // hop over the centre lane
+            const float vzi = (count > 1) ? (float)t * spread : 0.f;
             lf2::Object* o = g_objects.alloc();
             if (!o) {
 #ifdef LF2_HEADLESS
@@ -440,18 +505,20 @@ static void spawnOpoints(const lf2::Fighter& f, int team) {
 #endif
             float wx, wy;
             f.pointWorld(op.x, op.y, wx, wy);
-            // Fan the copies out in depth around the parent, like the original's
-            // multi-spawn does, so five arrows do not stack into one.
-            float dz = (count > 1) ? ((float)n - (float)(count - 1) * 0.5f) * spread : 0.f;
             float vx0 = faceRight ? (float)op.dvx : -(float)op.dvx;
-            o->spawn(&oa->data, objBankIndex(oa), wx, wy, f.z + dz,
+            // Each copy also gives up |vz| of forward speed (F.LF: vx -= |vz|
+            // facing right, vx += |vz| facing left). That is what turns the fan
+            // into a spread — the outer arrows lag as they drift apart.
+            if (faceRight) vx0 -= fabsf(vzi); else vx0 += fabsf(vzi);
+            o->spawn(&oa->data, objBankIndex(oa), wx, wy, f.z,
                      faceRight, op.action, team, vx0, (float)op.dvy);
+            o->vz = vzi;
             const dat::ObjectEntry* oe = g_index.object(op.oid);
             int oty = oe ? oe->type : 0;
             if (oty == 1 || oty == 2) {
                 o->weaponType = oty;
                 o->thrown     = true;
-                o->groundY    = f.z + dz;
+                o->groundY    = f.z;
                 o->ephemeral  = true;
             }
         }
@@ -478,7 +545,7 @@ static void damageObjects(const HitInfo& hi, bool fromRight, int skipIdx,
             if (!hit && boxOverlap(hi.box, toBox(wb))) hit = true;
         });
         if (!hit) continue;
-        o.rehit = hi.rest > 0 ? hi.rest : 8;
+        { int dummy = 0; applyRest(hi, o.rehit, dummy); }
         if (!o.takeHit(hi.injury, fromRight)) continue;
         // Broke: swap it for the shatter effect at the same spot.
         float bx = o.f.x, by = o.f.y, bz = o.f.z;
@@ -719,6 +786,9 @@ int main(int argc, char* argv[]) {
     int    gameOverTimer = 0;
     bool   playerWon     = false;
     int    lastSwingId   = -1;
+    // arest do JOGADOR — o escalar de objeto+0xEC do original. Trava o golpe
+    // inteiro contra todas as vítimas; o vrest por par vive em Enemy::rehitTimer.
+    int    playerArest   = 0;
     int    playerPrevFrame = -1;
 
     bool prevStart = false, prevSel = false;
@@ -830,6 +900,7 @@ int main(int argc, char* argv[]) {
                     playerIdx = menuCursor;
                     resetGame(ren, player, playerIdx, slots, gameSt);
                     lastSwingId = -1;
+                    playerArest = 0;
                     playerPrevFrame = -1;
                     aiEnabled = false;   // every match starts with frozen enemies
                 }
@@ -1028,11 +1099,19 @@ int main(int argc, char* argv[]) {
                         // waved the runner straight through the stone (it blocked
                         // for exactly one tick). Escape is now allowed only when
                         // the step moves AWAY from the obstacle's centre.
-                        float obsX = 0.f;
+                        float obsX = 0.f, obsZ = 0.f;
                         bool stuck = blockedByObstacle(player, g_objects,
-                                                       player.heldWeapon, &obsX);
+                                                       player.heldWeapon, &obsX, &obsZ);
                         if (stuck) {
-                            bool away = fabsf((prevX + mvX) - obsX) > fabsf(prevX - obsX);
+                            // "Away" has to be measured in BOTH axes. Comparing
+                            // |x - obsX| alone compared a value with itself on a
+                            // pure-depth step (mvX == 0): never away, so the else
+                            // reverted x AND z and up/down did nothing while in
+                            // contact — the only way off a stone was to back out
+                            // along x. mvZ was computed here and never used.
+                            const float d0x = prevX - obsX,         d0z = prevZ - obsZ;
+                            const float d1x = prevX + mvX - obsX,   d1z = prevZ + mvZ - obsZ;
+                            bool away = (d1x * d1x + d1z * d1z) > (d0x * d0x + d0z * d0z);
                             if (away) { player.x = prevX + mvX; player.z = prevZ + mvZ; }
                             else      { player.x = prevX;       player.z = prevZ; }
                         } else {
@@ -1054,14 +1133,16 @@ int main(int argc, char* argv[]) {
                 }
 
                 // ── new player swing re-arms the enemies ─────────────────────
+                if (playerArest > 0) --playerArest;
                 if (player.swingId != lastSwingId) {
                     for (int i = 0; i < NUM_ENEMIES; i++) slots[i].e.rehitTimer = 0;
+                    playerArest = 0;
                     lastSwingId = player.swingId;
                 }
 
                 // ── player attack → enemies ──────────────────────────────────
                 HitInfo hi;
-                if (fighterAttack(player.f, hi)) {
+                if (playerArest == 0 && fighterAttack(player.f, hi)) {
                     // Collect every legal victim first. An itr with vrest == 0 is
                     // single-target in the original (closest wins), so hitting the
                     // whole overlapping stack with one punch was wrong.
@@ -1075,6 +1156,10 @@ int main(int argc, char* argv[]) {
                         bool downed = ((es == lf2::ST_FALLING && hi.fall <= 40) ||
                                        es == lf2::ST_LYING) &&
                                       !itrIgnoresAntiJuggle(hi.kind);
+                        // lf2.exe FUN_00417400: the itr's `effect` can veto the
+                        // hit outright (fire cannot touch a burning victim).
+                        if (!lf2::itrEffectAllows(hi.effect, hi.attState, es,
+                                                  e.a.f.frameId, true)) continue;
                         if (e.rehitTimer == 0 && e.alive() && !downed && !e.a.untouchable() &&
                             fabsf(player.z - e.a.z) < (float)hi.zwidth &&
                             fighterBody(e.a.f, ebody) && boxOverlap(hi.box, ebody))
@@ -1091,7 +1176,7 @@ int main(int argc, char* argv[]) {
                     }
                     for (int c = 0; c < nCand; c++) {
                         Enemy& e = slots[cand[c]].e;
-                        e.rehitTimer = hi.rest;
+                        applyRest(hi, playerArest, e.rehitTimer);
                         e.hitFlash   = 10;
                         float kb = (float)(hi.dvx > 0 ? hi.dvx : 1);
                         e.a.hit(hi.injury, player.right ? kb : -kb, hi.fall, hi.effect);
@@ -1112,14 +1197,21 @@ int main(int argc, char* argv[]) {
                     lf2::Object& w = g_objects.objs[player.heldWeapon];
                     dat::Wpoint hw; fighterWpoint(player.f, hw);
                     HitInfo whi; bool swinging = false;
+                    whi.attState = player.f.state();   // for itrEffectAllows()
                     if (w.active && hw.attacking > 0) {
                         w.f.forEachItr([&](const lf2::WBox& wb, const dat::Itr& it) {
                             if (it.kind != 5 || swinging) return;
                             whi.box = toBox(wb);
                             whi.injury = it.injury; whi.fall = it.fall;
                             whi.dvx = it.dvx;
-                            whi.rest = it.vrest > 0 ? it.vrest : 9;   // weapon default
+                            whi.arest = it.arest; whi.vrest = it.vrest;
                             whi.zwidth = it.zwidth > 0 ? it.zwidth : 15;
+                            whi.kind   = it.kind;
+                            // vrest == 0 is single-target here too. This path knew
+                            // it (the `rest` line right above reads vrest) and then
+                            // swung through the whole overlapping stack anyway —
+                            // one club swing floored every enemy standing together.
+                            whi.singleTarget = (it.vrest == 0);
                             swinging = true;
                         });
                         const dat::File* wd = w.f.data;
@@ -1127,26 +1219,53 @@ int main(int argc, char* argv[]) {
                             const dat::StrengthEntry& se = wd->strength[hw.attacking];
                             whi.injury = se.injury; whi.fall = se.fall; whi.dvx = se.dvx;
                             whi.effect = se.effect;   // weapon7 (ice sword) is effect 3
-                            if (se.vrest > 0) whi.rest = se.vrest;
+                            if (se.vrest > 0) whi.vrest = se.vrest;
+                            if (se.arest > 0) whi.arest = se.arest;
                         }
                     }
-                    if (swinging) {
+                    if (swinging && playerArest == 0) {
                         damageObjects(whi, player.right, player.heldWeapon, /*attackerArmed=*/true);
+                        // Same two-pass shape as the melee path: collect the legal
+                        // victims, then narrow to the closest if the itr is
+                        // single-target.
+                        int  wcand[NUM_ENEMIES], nwCand = 0;
                         for (int i = 0; i < NUM_ENEMIES; i++) {
                             Box ebody; Enemy& e = slots[i].e;
                             int wes = e.a.f.state();
                             bool wDowned = ((wes == lf2::ST_FALLING && whi.fall <= 40) ||
                                             wes == lf2::ST_LYING) &&
                                            !itrIgnoresAntiJuggle(whi.kind);
+                            if (!lf2::itrEffectAllows(whi.effect, whi.attState, wes,
+                                                      e.a.f.frameId, true)) continue;
                             if (e.rehitTimer == 0 && e.alive() && !wDowned &&
                                 !e.a.untouchable() &&
                                 fabsf(player.z - e.a.z) < (float)whi.zwidth &&
-                                fighterBody(e.a.f, ebody) && boxOverlap(whi.box, ebody)) {
-                                e.rehitTimer = whi.rest;
-                                e.hitFlash   = 10;
-                                float kb = (float)(whi.dvx > 0 ? whi.dvx : 4);
-                                e.a.hit(whi.injury, player.right ? kb : -kb, whi.fall, whi.effect);
+                                fighterBody(e.a.f, ebody) && boxOverlap(whi.box, ebody))
+                                wcand[nwCand++] = i;
+                        }
+                        if (whi.singleTarget && nwCand > 1) {
+                            int best = wcand[0];
+                            float bd = fabsf(player.x - slots[best].e.a.x);
+                            for (int c = 1; c < nwCand; c++) {
+                                float d = fabsf(player.x - slots[wcand[c]].e.a.x);
+                                if (d < bd) { bd = d; best = wcand[c]; }
                             }
+                            wcand[0] = best; nwCand = 1;
+                        }
+                        for (int c = 0; c < nwCand; c++) {
+                            Enemy& e = slots[wcand[c]].e;
+                            applyRest(whi, playerArest, e.rehitTimer);
+                            e.hitFlash   = 10;
+                            float kb = (float)(whi.dvx > 0 ? whi.dvx : 4);
+                            e.a.hit(whi.injury, player.right ? kb : -kb, whi.fall, whi.effect);
+#ifdef LF2_HEADLESS
+                            // The held-weapon swing counts toward the harness's
+                            // damage figure too. It did not, which left the whole
+                            // <weapon_strength_list> path — injury, fall, dvx and
+                            // effect — invisible to the number used as the
+                            // regression signal.
+                            g_damageDealt += whi.injury;
+#endif
                         }
                     }
                 }
@@ -1162,17 +1281,23 @@ int main(int argc, char* argv[]) {
                         // before it, so `ehi.zwidth` was still the default 15 and
                         // every wide attack (henry has itrs with zwidth 76/55/34)
                         // was silently narrowed. && short-circuits left to right.
+                        // The anti-juggle test HAS to stay inline, after
+                        // fighterAttack has filled ehi — hoisting it into a
+                        // variable above the call is the very evaluation-order
+                        // trap this block was rewritten to close (it read
+                        // ehi.fall while ehi was still default-constructed). The
+                        // hoisted copy used to sit here, dead, cast away with a
+                        // (void); it is gone rather than left as a loaded gun.
                         int ps3 = player.f.state();
-                        bool pDown = ((ps3 == lf2::ST_FALLING && ehi.fall <= 40) ||
-                                      ps3 == lf2::ST_LYING);
                         if (!e.hasHitPlayer && e.alive() && !player.untouchable() &&
                             fighterAttack(e.a.f, ehi) &&
+                            lf2::itrEffectAllows(ehi.effect, ehi.attState, ps3,
+                                                 player.f.frameId, true) &&
                             !(((ps3 == lf2::ST_FALLING && ehi.fall <= 40) ||
                                ps3 == lf2::ST_LYING) && !itrIgnoresAntiJuggle(ehi.kind)) &&
                             fabsf(player.z - e.a.z) < (float)ehi.zwidth &&
                             boxOverlap(ehi.box, pBody))
                         {
-                            (void)pDown;
                             e.hasHitPlayer = true;
                             float kb = (float)(ehi.dvx > 0 ? ehi.dvx : 1);
                             player.hit(ehi.injury, e.a.right ? kb : -kb, ehi.fall, ehi.effect);
@@ -1189,13 +1314,20 @@ int main(int argc, char* argv[]) {
                     // right through everyone. The spent states (hiting/hit/
                     // rebounding) drop their itr in the .dat, so they stop hurting
                     // on their own, exactly like the original.
-                    if (o.rehit > 0) return;
+                    if (o.arest > 0) return;      // arest trava o objeto inteiro
                     HitInfo ohi;
                     if (!fighterAttack(o.f, ohi)) return;
+                    // Re-hit is tracked PER VICTIM, not once for the whole object.
+                    // lf2.exe keeps an arest/vrest array indexed by the victim's
+                    // object id (object+0xb8 …), which is what lets a piercing
+                    // ball (state 3006) go on to the next body in the same pass
+                    // while still respecting vrest against the one it just hit.
+                    // A single shared counter made every ball single-target.
                     if (o.team == 0) {                       // player's ball → enemies
                         for (int i = 0; i < NUM_ENEMIES; i++) {
                             Box ebody;
                             Enemy& e = slots[i].e;
+                            if (o.victimRest[i] > 0) continue;
                             // Same anti-juggle the melee path uses: a light hit
                             // cannot strike someone already falling, and nobody
                             // hits a body on the floor. Without this, projectiles
@@ -1205,6 +1337,8 @@ int main(int argc, char* argv[]) {
                             bool downed = ((es == lf2::ST_FALLING && ohi.fall <= 40) ||
                                            es == lf2::ST_LYING) &&
                                           !itrIgnoresAntiJuggle(ohi.kind);
+                            if (!lf2::itrEffectAllows(ohi.effect, ohi.attState, es,
+                                                      e.a.f.frameId, true)) continue;
                             if (e.alive() && !downed && !e.a.untouchable() &&
                                 fabsf(o.f.z - e.a.z) < (float)ohi.zwidth &&
                                 fighterBody(e.a.f, ebody) && boxOverlap(ohi.box, ebody))
@@ -1215,9 +1349,12 @@ int main(int argc, char* argv[]) {
                                 g_damageDealt += ohi.injury;
 #endif
                                 e.hitFlash = 10;
+                                applyRest(ohi, o.arest, o.victimRest[i]);
                                 o.onHit();
-                                o.rehit = ohi.rest;
-                                break;
+                                // A ball that spends itself on the first body
+                                // (state 3000 → `hiting`) stops here; a piercing
+                                // one keeps scanning the rest of the line.
+                                if (o.spent()) break;
                             }
                         }
                     } else if (havePBody) {                  // enemy ball → player
@@ -1225,12 +1362,14 @@ int main(int argc, char* argv[]) {
                         bool pDowned = ((ps2 == lf2::ST_FALLING && ohi.fall <= 40) ||
                                         ps2 == lf2::ST_LYING) &&
                                        !itrIgnoresAntiJuggle(ohi.kind);
-                        if (!pDowned &&
+                        if (o.victimRest[NUM_ENEMIES] == 0 && !pDowned &&
+                            lf2::itrEffectAllows(ohi.effect, ohi.attState, ps2,
+                                                 player.f.frameId, true) &&
                             fabsf(o.f.z - player.z) < (float)ohi.zwidth && boxOverlap(ohi.box, pBody)) {
                             float kb = (float)(ohi.dvx > 0 ? ohi.dvx : 4);
                             player.hit(ohi.injury, o.f.facingRight ? kb : -kb, ohi.fall, ohi.effect);
+                            applyRest(ohi, o.arest, o.victimRest[NUM_ENEMIES]);
                             o.onHit();
-                            o.rehit = ohi.rest;
                         }
                     }
                 });

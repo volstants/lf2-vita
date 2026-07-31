@@ -66,13 +66,31 @@ except Exception:
     pass
 EOF
 )"
-if [ -n "$DLL" ] && [ -d "$DLL" ]; then
+if [ -n "$DLL" ] && [ -n "${DLL:-}" ] && [ -d "$DLL" ]; then
+    # UNLINK EACH DESTINATION FIRST. `cp -f` does NOT overwrite a dangling
+    # symlink: it refuses with "not writing through dangling symlink" and, under
+    # `set -e`, kills the script before a single lib is copied. That is precisely
+    # the state this script is called to REPAIR — the Makefile guard fires
+    # because .sdlhost/lib is full of dead links into a previous session's pip
+    # prefix — so the recovery path has to work from the broken state, not only
+    # from the empty one. `rm -f` removes the LINK (it never follows it), which
+    # is what we want; `cp --remove-destination` would do the same but is a GNU
+    # extension. Note `rm -f` succeeds silently on a dangling link but NOT on a
+    # read-only mount, hence the explicit check below.
     for f in "$DLL"/*.so "$DLL"/*.so.*; do
         [ -e "$f" ] || continue
-        cp -f "$f" "$DEST/lib/"
+        dst="$DEST/lib/$(basename "$f")"
+        rm -f "$dst" 2>/dev/null || true
+        if [ -L "$dst" ] || { [ -e "$dst" ] && [ ! -w "$dst" ]; }; then
+            echo "host_sdl.sh: cannot replace $dst (stale link on a read-only or" >&2
+            echo "             restricted mount). Delete .sdlhost/lib by hand and" >&2
+            echo "             re-run, or move the repo off that mount." >&2
+            exit 1
+        fi
+        cp -f "$f" "$dst"
     done
     # soname aliases (libFoo.so → libFoo.so.0), relative so the folder is movable
-    ( cd "$DEST/lib" && for f in *.so; do ln -sf "$f" "${f%.so}.so.0"; done )
+    ( cd "$DEST/lib" && for f in *.so; do rm -f "${f%.so}.so.0"; ln -sf "$f" "${f%.so}.so.0"; done )
     echo "SDL2 runtime libs copied into $DEST/lib"
 fi
 

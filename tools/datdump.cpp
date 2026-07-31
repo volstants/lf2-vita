@@ -21,9 +21,11 @@ static void printFrame(const dat::Frame& f) {
         std::printf("    bdy  kind:%d  x:%d y:%d w:%d h:%d\n", b.kind, b.x, b.y, b.w, b.h);
     for (const auto& i : f.itrs)
         std::printf("    itr  kind:%d  x:%d y:%d w:%d h:%d  dvx:%d dvy:%d "
-                    "fall:%d injury:%d bdefend:%d effect:%d zwidth:%d\n",
+                    "fall:%d injury:%d bdefend:%d effect:%d zwidth:%d "
+                    "arest:%d vrest:%d\n",
                     i.kind, i.x, i.y, i.w, i.h, i.dvx, i.dvy,
-                    i.fall, i.injury, i.bdefend, i.effect, i.zwidth);
+                    i.fall, i.injury, i.bdefend, i.effect, i.zwidth,
+                    i.arest, i.vrest);
     for (const auto& o : f.opoints)
         std::printf("    opoint kind:%d x:%d y:%d action:%d oid:%d facing:%d dv(%d,%d)\n",
                     o.kind, o.x, o.y, o.action, o.oid, o.facing, o.dvx, o.dvy);

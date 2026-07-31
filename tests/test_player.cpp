@@ -442,6 +442,143 @@ int main() {
         CHECK(v.knockedDown, "golpe em alvo congelado sempre derruba");
     }
 
+    // ── Achados da 2ª revisão externa (2026-07-30) ───────────────────────────
+    {   // #2 o dvy do frame tem de chegar ao PERSONAGEM. Fighter::applyDvy
+        // escrevia em Fighter::vy, que só objetos livres integram, então os 33
+        // frames de personagem com dvy != 0 eram dado morto. O caso canônico é o
+        // frame 202 (última etapa do gelo), dvy -3 nos 24 arquivos.
+        const dat::Frame* f202 = dennis.frame(202);
+        CHECK(f202 && f202->dvy == -3, "frame 202 carrega dvy -3 no .dat");
+        lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
+        v.f.setFrame(202);
+        v.tick(0,0,0,0,false,false);
+        CHECK(!v.grounded(), "o dvy -3 do frame 202 tira o personagem do chão");
+        CHECK(v.h < 0.f, "…e a altura passa a ser integrada a partir do dado");
+    }
+    {   // #2b dvy 550 (DV_STOP) ZERA a velocidade vertical, não soma.
+        lf2::Player v; v.load(&dennis); v.h = -20.f; v.vy = -8.f;
+        v.f.applyDvy(lf2::DV_STOP);
+        v.drainFrameDvy();
+        CHECK(approx(v.vy, 0.f), "dvy 550 zera vy em vez de acumular");
+    }
+    {   // #2c um pulo usa jump_height do header, sem somar o dvy do frame 210.
+        lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
+        v.startJump(false);
+        CHECK(approx(v.vy, v.jumpVy), "o pulo aplica jump_height puro (dvy não empilha)");
+    }
+    {   // #4 a cadeia do gelo é 200 (state 15) → 201 (state 13) → 202 (state 15).
+        // Testar só o state — ou só 200 e 201 — deixa buracos nas duas pontas.
+        for (int fr = 200; fr <= 202; ++fr) {
+            lf2::Player v; v.load(&dennis);
+            v.f.setFrame(fr);
+            char msg[96];
+            std::snprintf(msg, sizeof msg, "frame %d conta como congelado", fr);
+            CHECK(v.iced(), msg);
+        }
+        lf2::Player v; v.load(&dennis); v.f.setFrame(203);
+        CHECK(!v.iced(), "frame 203 (queimando) não conta como congelado");
+    }
+    {   // #4a um 2º hit de gelo no frame 202 não pode REINICIAR a cadeia.
+        lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
+        v.f.setFrame(202);
+        v.hit(10, 1.f, 10, /*effect=*/3);
+        CHECK(v.f.frameId != lf2::fid::ICE, "gelo no frame 202 não reinicia a cadeia");
+    }
+    {   // #4b …e um hit fraco no frame 202 tem de estilhaçar.
+        lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
+        v.f.setFrame(202);
+        v.hit(10, 1.f, /*itrFall=*/1, /*effect=*/0);
+        CHECK(v.knockedDown, "hit fraco no frame 202 estilhaça o gelo");
+    }
+
+    // ── Fogo: o gate de `effect` do FUN_00417400 (lf2.exe @0x417400) ────────
+    {   // #5 effect 20 (o itr que um corpo em chamas irradia, frames 203-206) e
+        // effect 21 (chama do firen_flame) não tocam quem já está em state 18
+        // (queimando) nem em state 19 (corrida em chamas do Firen).
+        CHECK(!lf2::itrEffectAllows(20, 0, lf2::ST_BURNING,  203, true),
+              "effect 20 não acerta quem está queimando (state 18)");
+        CHECK(!lf2::itrEffectAllows(20, 0, lf2::ST_BURN_RUN, 258, true),
+              "effect 20 não acerta a corrida em chamas (state 19)");
+        CHECK(!lf2::itrEffectAllows(21, 0, lf2::ST_BURN_RUN, 258, true),
+              "effect 21 não acerta a corrida em chamas (state 19)");
+        CHECK(!lf2::itrEffectAllows(2, lf2::ST_BURN_RUN, lf2::ST_BURNING, 203, true),
+              "effect 2 vindo do burn_run não requeima quem já queima");
+        CHECK( lf2::itrEffectAllows(2, lf2::ST_BURN_RUN, lf2::ST_STANDING, 0, true),
+              "effect 2 do burn_run acerta normalmente quem não queima");
+        CHECK(!lf2::itrEffectAllows(4, 0, lf2::ST_STANDING, 0, true),
+              "effect 4 (shrafe) nunca acerta personagem");
+        CHECK(!lf2::itrEffectAllows(30, 0, lf2::ST_ICE, 201, true),
+              "effect 30 (freeze column) não acerta quem está congelado");
+    }
+    {   // #5a o alvo em chamas TEM de cair: 36 TU e desaba, mesmo levando fogo
+        // repetido — hit() rejeita o effect 20/21 antes do dano.
+        lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
+        v.hit(45, 10.f, 70, /*effect=*/2);
+        CHECK(v.f.state() == lf2::ST_BURNING, "effect 2 acende o alvo (frame 203)");
+        int hpAfterIgnite = v.f.hp;
+        v.hit(30, 6.f, 70, /*effect=*/20);
+        CHECK(v.f.hp == hpAfterIgnite, "effect 20 em quem queima não tira HP");
+        CHECK(v.burn == lf2::Player::BURN_TICKS, "…e não reinicia o cronômetro");
+        // O fogo do chão continua batendo (vrest 10) enquanto o alvo estiver
+        // dentro dele — mas só reacende quem NÃO está em state 18. O cronômetro
+        // tem de chegar a zero e o alvo tem de tombar; antes do gate ele era
+        // reiniciado a cada acerto e a vítima queimava de pé para sempre.
+        bool collapsed = false;
+        for (int t = 0; t < 150 && !collapsed; ++t) {
+            if (t % 10 == 0) v.hit(30, 6.f, 70, 20);  // fogo do chão, a cada vrest
+            v.tick(false,false,false,false,false,false);
+            if (v.f.state() == lf2::ST_FALLING) collapsed = true;
+        }
+        CHECK(collapsed, "alvo em chamas desaba (não fica queimando parado)");
+    }
+    {   // #5b pegar fogo NO AR não pode ser apagado pela pose de pulo.
+        lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
+        v.startJump(false);
+        for (int i = 0; i < 4; ++i) v.tick(false,false,false,false,false,false);
+        v.hit(45, 10.f, 70, /*effect=*/2);
+        v.tick(false,false,false,false,false,false);
+        CHECK(v.f.state() == lf2::ST_BURNING, "queima no ar sobrevive ao airborneTick");
+        // lf2.exe @0x40e893: caindo (vy > 1.0) a queimadura troca para 205.
+        bool sawAir = false;
+        for (int i = 0; i < 20; ++i) {
+            v.tick(false,false,false,false,false,false);
+            if (v.f.frameId >= lf2::fid::BURNING_AIR) sawAir = true;
+        }
+        CHECK(sawAir, "queimando e caindo usa os frames 205/206 (pose no ar)");
+        CHECK(v.grounded() && v.f.state() == lf2::ST_BURNING,
+              "…e continua queimando depois de aterrissar");
+    }
+    {   // #5c segundo hit em quem já está caindo mantém o knockback do itr
+        // (lf2.exe: injured->vx += itr->dvx, sem exceção para malabarismo).
+        lf2::Player v; v.load(&dennis); v.x = 400.f; v.z = 400.f; v.syncAnchor();
+        v.hit(50, 20.f, 70, 0);                     // derruba
+        CHECK(v.knockedDown, "primeiro hit pesado derruba");
+        v.tick(false,false,false,false,false,false);
+        v.hit(50, 20.f, 70, 0);                     // re-hit no ar
+        CHECK(std::fabs(v.f.vx) > 1.f, "re-hit no ar ainda carrega o dvx do itr");
+    }
+
+    // ── arest x vrest (lf2.exe 0x0042f2c8-0x0042f31b) ───────────────────────
+    {   int a = -1, v = -1;
+        // arest >= 4 → usa o valor do itr; vrest 0 → nada por par.
+        lf2::applyRest(15, 0, a, v);
+        CHECK(a == 15 && v == -1, "arest 15 / vrest 0: grava arest, nao grava par");
+        // arest < 4 E vrest == 0 → piso 4.
+        a = -1; v = -1; lf2::applyRest(0, 0, a, v);
+        CHECK(a == 4 && v == -1, "arest 0 / vrest 0: piso de 4 (nao 8)");
+        a = -1; v = -1; lf2::applyRest(3, 0, a, v);
+        CHECK(a == 4, "arest 3 / vrest 0: piso de 4");
+        // Com vrest > 0 o piso NAO se aplica, e o arest do itr vai assim mesmo.
+        a = -1; v = -1; lf2::applyRest(0, 10, a, v);
+        CHECK(a == 0 && v == 10, "vrest 10 / arest 0: sem piso, grava o par");
+        // arest e vrest coexistem: o arest e' gravado em TODO acerto.
+        a = -1; v = -1; lf2::applyRest(6, 10, a, v);
+        CHECK(a == 6 && v == 10, "arest 6 + vrest 10: os DOIS sao gravados");
+        // vrest <= 0 nunca toca no contador do par.
+        a = 0; v = 7; lf2::applyRest(6, 0, a, v);
+        CHECK(v == 7, "vrest 0 nao zera o contador do par que ja existia");
+    }
+
     if (g_fail) { std::printf("\n%d CHECK(S) FAILED\n", g_fail); return 1; }
     std::printf("\nall player tests passed\n");
     return 0;

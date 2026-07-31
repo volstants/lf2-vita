@@ -56,7 +56,11 @@ struct Enemy {
         int s = a.state();
         bool reacting = !a.alive() ||
                         s == lf2::ST_INJURED || s == lf2::ST_FALLING ||
-                        s == lf2::ST_LYING;
+                        s == lf2::ST_LYING ||
+                        // Burning (18) and frozen (13) are reaction states the
+                        // victim does not control either — an enemy on fire that
+                        // kept walking and punching was the AI ignoring them.
+                        s == lf2::ST_BURNING || s == lf2::ST_ICE;
 
         constexpr float REACH_X = 55.f, REACH_Z = 12.f;
 

@@ -60,7 +60,70 @@ enum State {
     ST_INJURED2   = 16,  // Dance of Pain (frames 226-229): the long stun, and the
                          // ONLY state an itr kind 1 (catch_injured) may grab
                          // (OpenLF2 const.c:102 injured_state_2 = 16).
+    ST_BURN_RUN   = 19,  // Firen's fire run (firen.dat 255-261). Immune to fire,
+                         // exactly like ST_BURNING — see itrEffectAllows().
 };
+
+// ── itr `effect` gate ────────────────────────────────────────────────────────
+// SOURCE: lf2.exe, FUN_00417400 @ 0x00417400 ("does attack succeed"), the
+// early-out chain that runs for `itr->kind == 0` before any box test. In the
+// decompilation the itr is `piVar8` (stride 0x50) and `piVar8[0xb]` is
+// itr->effect (+0x2c); the victim's state is read as
+// frames[frame_id3].state (+0x7ac), the file type as file->type (+0x6f8):
+//
+//   effect 4  (shrafe)  && victim is a character                → NO HIT
+//   effect 20 (burn)    && (victim NOT a character || state 18 || 19) → NO HIT
+//   effect 21 (flame)   && (victim state 18 || state 19)        → NO HIT
+//   effect 30 (column)  && victim frame id in 200..202 (frozen) → NO HIT
+//   effect 2  (fire)    && ATTACKER state 19 && victim state 18 → NO HIT
+//
+// NOTE ON THE HIERARCHY: OpenLF2's class_global.c:52-73 has the same five
+// rules but labels the first two `fire_effect (2)` and `burn_effect (20)`.
+// The binary uses 0x14 (20) and 0x15 (21) there. The binary wins.
+//
+// This is what makes fire self-consistent in the original: a character that is
+// already burning (state 18) or doing the fire run (state 19) cannot be burnt
+// again, and cannot be hurt by the flames that a burning body radiates.
+inline bool itrEffectAllows(int effect, int attackerState, int victimState,
+                            int victimFrameId, bool victimIsCharacter)
+{
+    if (effect == 4  && victimIsCharacter) return false;
+    if (effect == 20 && (!victimIsCharacter ||
+                         victimState == ST_BURNING || victimState == ST_BURN_RUN))
+        return false;
+    if (effect == 21 && (victimState == ST_BURNING || victimState == ST_BURN_RUN))
+        return false;
+    if (effect == 30 && victimFrameId >= 200 && victimFrameId <= 202) return false;
+    if (effect == 2  && attackerState == ST_BURN_RUN && victimState == ST_BURNING)
+        return false;
+    return true;
+}
+
+// ── Os dois temporizadores de re-acerto ──────────────────────────────────────
+// SOURCE: lf2.exe 0x0042f2c8-0x0042f31b, com o irmão em 0x0043030f-0x004303ce.
+// Com `ecx` = itr, `ebx` = id do atacante, `edi` = id da vítima:
+//
+//     42f2d6:  mov  0x20(%ecx),%eax      ; itr->arest   (itr+0x20)
+//     42f2d9:  cmp  $0x4,%eax
+//     42f2dc:  jge  0x42f2f7
+//     42f2de:  cmpl $0x0,0x24(%ecx)      ; itr->vrest   (itr+0x24)
+//     42f2e2:  jne  0x42f2f7
+//     42f2e4:  movl $0x4,0xec(%eax)      ; atacante->arest = 4     (PISO)
+//     42f2f7:  mov  %eax,0xec(%edx)      ; atacante->arest = itr->arest
+//     42f304:  cmpl $0x0,0x24(%ecx)
+//     42f308:  jle  0x42f31b             ; vrest <= 0 → nada por par
+//     42f314:  mov  %cl,0xf0(%eax,%ebx,1); vitima->vrest_of_objects[atacante]
+//
+// Consequências que o engine tinha erradas ao fundir os dois num só valor:
+//   • `arest` é gravado em TODO acerto, inclusive quando o itr também tem vrest;
+//   • o piso é 4, e só quando `arest < 4` E `vrest == 0` (o 8/9 era invenção);
+//   • `vrest` é BYTE, por par, e só é gravado quando > 0.
+inline void applyRest(int itrArest, int itrVrest, int& attackerArest, int& pairVrest) {
+    int a = itrArest;
+    if (a < 4 && itrVrest == 0) a = 4;
+    attackerArest = a;
+    if (itrVrest > 0) pairVrest = itrVrest;
+}
 
 // World-space axis-aligned box (float so it composes with sub-pixel motion).
 struct WBox { float x = 0, y = 0, w = 0, h = 0; };
@@ -92,6 +155,16 @@ struct Fighter {
                              // pushed into the Fighter by syncAnchor() every tick,
                              // so flipping only facingRight here would be undone.
 
+    // ── Frame dvy, staged for an owner that integrates height itself ─────────
+    // Free objects fly on Fighter::vy directly, but a CHARACTER's vertical state
+    // lives on the controller (Player::h / Player::vy) — so a frame's dvy written
+    // only into Fighter::vy is read by nobody and the value sits here forever.
+    // That was the case for every dvy in the character data: frame 202, the last
+    // ice frame, carries dvy -3 in all 24 character files and it never moved
+    // anyone. Frames stage their dvy here and Player::drainFrameDvy() pulls it in.
+    float dvyPending = 0.f;   // accumulated dvy since the last drain (neg = up)
+    bool  dvyStop    = false; // a 550 landed: ZERO the velocity, don't add to it
+
     // Vitals (LF2 characters are all 500 HP/MP unless a file overrides them).
     int   hp = 0, mp = 0, maxHp = 0, maxMp = 0;
 
@@ -117,9 +190,10 @@ struct Fighter {
     }
     void applyDvy(int dv) {
         if (dv == DV_KEEP) return;
-        if (dv == DV_STOP) { vy = 0.f; return; }
+        if (dv == DV_STOP) { vy = 0.f; dvyPending = 0.f; dvyStop = true; return; }
         // F.LF frame_force(): dvy ACCUMULATES (vy += dvy) while dvx/dvz SET.
         vy += (float)dv;                      // negative = upward, no facing flip
+        dvyPending += (float)dv;              // …and stage it for a Player owner
     }
     void applyDvz(int dv) {
         if (dv == DV_KEEP) return;

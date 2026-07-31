@@ -54,7 +54,11 @@ namespace fid {
     //   200 → 201 (state 13, wait 90 = 3 s frozen) → 202 → 182 falling
     //   203 ↔ 204 / 205 ↔ 206 (state 18) burning; loops, exit is external
     constexpr int ICE      = 200;
-    constexpr int BURNING  = 203;
+    constexpr int BURNING  = 203;  // 203↔204: queimando em pé
+    constexpr int BURNING_AIR = 205; // 205↔206: a mesma queimadura caindo
+                                     // (lf2.exe @0x40e8c5 troca 203/204 → 205
+                                     //  assim que a velocidade vertical passa
+                                     //  de 1.0; ver Player::tickInner)
     constexpr int FALLING  = 180;  // 180-191 knockdown, engine picks by velocity
     constexpr int LYING    = 230;  // 230-231, next:219 (auto get-up) if alive
 }
@@ -175,7 +179,12 @@ struct Player {
     int  maxHp() const { return f.maxHp; }
     int  state() const { return f.state(); }
     int  pic()   const { return f.pic(); }
-    bool grounded()    const { return h >= 0.f; }
+    // On the ground means BOTH resting on it and not moving off it. Testing h
+    // alone made a frame's own dvy unusable: the drain sets vy negative while h
+    // is still exactly 0, and with `h >= 0` the airborne branch never ran, so the
+    // lift was frozen in place instead of integrated. This is LF2's own airborne
+    // test — F.LF character.js:1668 `$.ps.y < 0 || $.ps.vy < 0`.
+    bool grounded()    const { return h >= 0.f && vy >= 0.f; }
     bool isDefending() const { return f.state() == ST_DEFEND; }
     // Dead only once knocked down AND out of HP — while falling with 0 HP the
     // actor is still "dying", not yet lying.
@@ -201,9 +210,44 @@ struct Player {
         z = clampF(z, (float)Z_MIN, (float)Z_MAX);
     }
 
+    // ── Frame dvy → world model ──────────────────────────────────────────────
+    // Pull in whatever dvy the frame graph applied since the last call. Without
+    // this the character data's dvy is dead: Fighter::applyDvy writes it to
+    // Fighter::vy, which only free-flying objects integrate, while a character's
+    // height runs entirely on Player::vy. Census of the 24 character files: 33
+    // frames carry a non-zero dvy, chief among them frame 202 — the last ice
+    // frame, dvy -3 in EVERY file — plus davis 290/300, john 290, deep 266/268/
+    // 270, rudolf 274, woody 253 and jack 301/303.
+    // 550 (DV_STOP) zeroes the velocity; any other value ADDS to it (F.LF
+    // frame_force(): dvy accumulates where dvx/dvz assign).
+    void drainFrameDvy() {
+        if      (f.dvyStop)            vy = 0.f;
+        else if (f.dvyPending != 0.f)  vy += f.dvyPending;
+        f.dvyPending = 0.f; f.dvyStop = false; f.vy = 0.f;
+    }
+
+    // The engine's OWN launches (jump, dash, knockdown) assign the vertical
+    // velocity outright, exactly as LF2 applies jump_height — so the entry
+    // frame's dvy must not be added on top of them. Discard whatever the
+    // setFrame() that precedes the launch staged.
+    void discardFrameDvy() { f.dvyPending = 0.f; f.dvyStop = false; f.vy = 0.f; }
+    void launch(float v) { h = -0.1f; vy = v; discardFrameDvy(); }
+
     // ── Per-tick update (run at 30 Hz) ───────────────────────────────────────
+    // Thin wrapper so the frame's dvy is collected on EVERY path. tickInner has
+    // a dozen early returns and frames are also entered from outside it (hit(),
+    // which main.cpp calls between ticks), so draining at one point inside the
+    // body would miss most of them. Drain on the way in (frames entered since
+    // the last tick) and on the way out (frames entered by this tick).
     void tick(bool L, bool R, bool U, bool D, bool atk, bool jmp,
               bool def = false, bool spc = false) {
+        drainFrameDvy();
+        tickInner(L, R, U, D, atk, jmp, def, spc);
+        drainFrameDvy();
+    }
+
+    void tickInner(bool L, bool R, bool U, bool D, bool atk, bool jmp,
+                   bool def, bool spc) {
         // Input edge + double-tap bookkeeping (every tick).
         bool newL = L && !prevL, newR = R && !prevR;   // run double-tap edges
         bool newU = U && !prevU, newDn = D && !prevDn, newSpc = spc && !prevSpc;
@@ -220,8 +264,27 @@ struct Player {
         if (burn > 0 && --burn == 0 && f.state() == ST_BURNING) {
             // Enter the tumble; the promotion below turns it into a real knockdown
             // (setting knockedDown here would suppress that and freeze frame 180).
+            // Clearing the flag first is what ARMS that promotion: a victim who
+            // was already knockedDown when the fire caught him kept the flag, the
+            // promotion was skipped, and he stood upright inside the falling frame
+            // (180, `next: 0` = hold) forever instead of collapsing.
+            knockedDown = false;
             f.setFrame(fid::FALLING);
         }
+
+        // Queimando E CAINDO → os frames 205/206, a pose de fogo na horizontal.
+        // SOURCE: lf2.exe 0x0040e893-0x0040e8c5 (dentro de FUN_0040e490, o update
+        // por tick do objeto). Literalmente:
+        //     mov  0x70(%esi),%eax            ; frame_id
+        //     cmpl $0x12,0x7ac(%edx,%ecx,1)   ; frames[frame_id].state == 18 ?
+        //     cmp  $0xcd,%eax                 ; frame_id < 205 ?
+        //     fcompl 0x48(%esi)               ; 1.0 vs object->vy
+        //     movl $0xcd,0x70(%esi)           ; frame_id = 205
+        // É a prova de que no original o state 18 SOBREVIVE ao voo — ele não é
+        // trocado por pose de pulo, ele ganha um par de frames próprio. 203↔204
+        // é a queimadura em pé; 205↔206 é a mesma queimadura caindo.
+        if (f.state() == ST_BURNING && f.frameId < fid::BURNING_AIR && vy > 1.f)
+            f.setFrame(fid::BURNING_AIR);
 
         // GROUND FRICTION (F.LF mechanics.dynamics: ps.fric = 1 per tick while
         // ps.y === 0, snapped to 0 below GC.min_speed = 1).
@@ -274,14 +337,21 @@ struct Player {
             if (ks != ST_FALLING && ks != ST_LYING) knockedDown = false;
         }
 
-        // A frame chain can DROP INTO a falling frame while the actor is still on
-        // the ground: the ice chain ends at 182 and the burn timer sends you to
-        // 180. Grounded, nothing integrates that fall, so the victim just stood
-        // there in the first frame of a tumble. Promote it to a real knockdown.
-        if (grounded() && !knockedDown && f.state() == ST_FALLING) {
+        // A frame chain can DROP INTO a falling frame on its own: the ice chain
+        // ends at 182 and the burn timer sends you to 180. Flag it as a real
+        // knockdown so the airborne branch HOLDS the tumble frames instead of
+        // overwriting them with a jump pose, and so the landing goes to LYING.
+        //
+        // The launch velocity comes from the DATA where the data has one. Frame
+        // 202 carries dvy -3, which drainFrameDvy() has already put into vy — so
+        // by the time the chain reaches 182 the actor is airborne and we must not
+        // overwrite it. Only a chain that arrives with no vertical motion of its
+        // own (the burn timer's jump straight to 180) still needs a nudge, and
+        // that -6 is a tuning constant with no source, so keep it minimal and
+        // labelled rather than applying it to cases the data already covers.
+        if (!knockedDown && f.state() == ST_FALLING) {
             knockedDown = true;
-            h  = -0.1f;
-            vy = -6.f;
+            if (grounded()) launch(-6.f);   // INFERENCE: no dvy in the data here
         }
 
         if (!grounded()) { airborneTick(U, D, atk); syncAnchor(); return; }
@@ -496,6 +566,12 @@ struct Player {
             // made the move "start, freeze mid-way and end".
             if (scriptedState(f.state())) { f.advance(); return; }
             f.vx = 0.f;
+            // …and landing must not snuff out a reaction state either: a victim
+            // who catches fire or freezes in mid-air keeps burning/frozen on the
+            // floor, and leaves through the burn timer / the ice chain's own
+            // `next`, not through this line.
+            int ls = f.state();
+            if (ls == ST_BURNING || ls == ST_ICE) { f.advance(); return; }
             f.setFrame(knockedDown ? fid::LYING : fid::STANDING);
             return;
         }
@@ -504,7 +580,13 @@ struct Player {
         int s = f.state();
         // Already mid air-attack (jump_attack = state 3, dash_attack = state 15)
         // or in a hardcoded per-character state: let the frame graph play out.
-        if (s == ST_ATTACK || s == ST_SPECIAL || scriptedState(s)) { f.advance(); return; }
+        // BURNING (18) and ICE (13) belong here too: they are reaction states the
+        // victim does not control, and overwriting them with a jump pose put the
+        // fire out in mid-air — the burn timer then expired against a `jump`
+        // state, its `f.state() == ST_BURNING` test failed, and the victim landed
+        // on his feet instead of collapsing.
+        if (s == ST_ATTACK || s == ST_SPECIAL || s == ST_BURNING || s == ST_ICE ||
+            scriptedState(s)) { f.advance(); return; }
         // Attack pressed in the air → throw a held weapon, else jump/dash attack.
         if (atk) {
             if (throwHeldIfArmed()) return;
@@ -572,16 +654,14 @@ struct Player {
     // tick() from the next frame on.
     void startJump(bool moving) {
         f.setFrame(fid::JUMP);                 // state 4
-        h  = -0.1f;
-        vy = jumpVy;
+        launch(jumpVy);                        // jump_height WINS over frame dvy
         f.vx = moving ? (right ? jumpDist : -jumpDist) : 0.f;
     }
 
     // Running jump: a low, fast forward leap (state 5, frames 213-214).
     void startDash() {
         f.setFrame(fid::DASH);                 // state 5
-        h  = -0.1f;
-        vy = dashVy;
+        launch(dashVy);                        // dash_height WINS over frame dvy
         f.vx = right ? dashDist : -dashDist;
     }
 
@@ -609,10 +689,33 @@ struct Player {
     static bool effectIsIce(int e)   { return e == 3 || e == 30; }
     static bool effectDropsWeapon(int e) { return effectIsIce(e) || (effectIsFire(e) && e != 20); }
 
+    // Frozen = anywhere in the ice chain, tested by FRAME ID and not by state.
+    // The chain is 200 (state 15) → 201 (state 13, wait 90 = the 3 s freeze) →
+    // 202 (state 15) → 182, so only the middle frame carries the "ice" state and
+    // a state-only test leaves a two-tick hole at each end. Both consumers need
+    // the whole range: one so a second ice hit cannot RESTART the chain, the
+    // other so a hit lands as a shatter (F.LF character.js:1665 — a frozen victim
+    // always falls down). Covering 200 and 201 but not 202 reintroduced exactly
+    // the bug at the far end of the chain.
+    bool iced() const {
+        return f.state() == ST_ICE ||
+               (f.frameId >= fid::ICE && f.frameId <= fid::ICE + 2);
+    }
+
     int hit(int dmg, float kbx, int itrFall, int effect = 0) {
         // Vanished (next: 1280) = F.LF's effect.super: the bdy is skipped
         // entirely, so nothing can touch you until you reappear.
         if (untouchable()) return 0;
+        // The itr `effect` veto (lf2.exe FUN_00417400 — see itrEffectAllows).
+        // The caller applies the full rule, attacker state included; this is the
+        // victim-only half, repeated here so NO path can burn a burning body.
+        // It must run BEFORE the damage: the original rejects the pair outright,
+        // it does not "hit for damage but skip the reaction" — which is what the
+        // old guard down in the fire branch did, and why a victim standing in
+        // Firen's ground fire kept bleeding HP while frozen in frame 203.
+        if (!itrEffectAllows(effect, /*attackerState=*/-1, f.state(), f.frameId,
+                             /*victimIsCharacter=*/true))
+            return 0;
         if (itrFall < 0) itrFall = 20;                // default fall for unset itr
         bool heavyBlow    = itrFall >= 60;            // guard-breaking / instant fall
         bool blockedFront = isDefending() &&
@@ -635,11 +738,7 @@ struct Player {
         // entirely — Firen's fire and Freeze's ice landed as plain damage.
         if (effectIsIce(effect)) {
             if (effectDropsWeapon(effect)) dropWeaponReq = true;
-            // Frame 200 is state 15 and only 201 is 13, so testing the state
-            // alone let a second ice hit in the first ticks restart the chain.
-            bool alreadyIced = (f.state() == ST_ICE) ||
-                               f.frameId == fid::ICE || f.frameId == fid::ICE + 1;
-            if (!alreadyIced) {
+            if (!iced()) {
                 fp = 0; burn = 0; knockedDown = false;
                 f.vx = 0.f; h = 0.f; vy = 0.f;
                 f.setFrame(fid::ICE);           // 200 → 201 (3 s) → 202 → falling
@@ -648,9 +747,6 @@ struct Player {
         }
         if (effectIsFire(effect)) {
             if (effectDropsWeapon(effect)) dropWeaponReq = true;
-            // Already burning? F.LF: a burning victim is IMMUNE to the weak fire
-            // effects 20/21, so they must not restart the animation.
-            if (f.state() == ST_BURNING && (effect == 20 || effect == 21)) return lost;
             fp = 0;
             f.vx = 0.f;
             f.setFrame(fid::BURNING);           // 203, locked for BURN_TICKS
@@ -669,19 +765,28 @@ struct Player {
         // ice shatter and what gives the game its anti-air.
         //   character.js:1665  if ($.state() == 13) { falldown() }
         //   character.js:1668  else if ($.ps.y < 0 || $.ps.vy < 0) { falldown() }
-        bool frozen   = (f.state() == ST_ICE) || f.frameId == fid::ICE ||
-                        f.frameId == fid::ICE + 1;
-        bool airborne = !grounded() || vy < 0.f;
+        bool frozen   = iced();
+        bool airborne = !grounded();          // grounded() now folds in vy < 0
         if (fp > FP_FALL || f.hp <= 0 || frozen || airborne) {   // knockdown / juggle
             fp = 0;
             bool juggle = knockedDown;                // already airborne = re-hit
             knockedDown = true;
             f.setFrame(fid::FALLING);
-            h = juggle ? h : -0.1f;
-            vy = juggle ? -6.f : -8.f;                // re-loft
-            // Juggle hits keep the victim in place (re-loft only); the FIRST
-            // launch carries the itr's horizontal knockback.
-            float lv = juggle ? 0.f : std::fabs(kbx);
+            // The knockback is the engine's, not the frame's: discard the tumble
+            // frame's own dvy so it cannot stack on top of the launch.
+            if (juggle) { vy = -6.f; discardFrameDvy(); }   // re-loft, keep height
+            else        { launch(-8.f); }
+            // EVERY knockdown carries the itr's horizontal knockback, including a
+            // re-hit on a victim already in the air.
+            // SOURCE: lf2.exe 0x0042ee00-0x0042ef00 (lf2_decomp.c 81100-81190):
+            // the knockback block does `injured->vx +/- itr->dvx` (the itr is
+            // `local_74`, dvx is `local_74[5]` at +0x14), signed by the attacker's
+            // facing, with no juggle special case anywhere in the chain.
+            // We used to zero it for juggles ("keep the victim in place"), an
+            // invention with no source: a second hit landing on a falling body
+            // just bumped it, so Henry's charged arrow looked like it knocked the
+            // target down on one shot and not on the next.
+            float lv = std::fabs(kbx);
             if (!juggle && lv < 6.f) lv = 6.f;
             f.vx = (kbx < 0.f ? -lv : lv);
         } else {

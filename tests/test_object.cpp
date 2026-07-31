@@ -350,6 +350,45 @@ int main() {
         }
     }
 
+    // ── Flecha concentrada do Henry: state 3006 atravessa ───────────────────
+    {   dat::File a2 = dat::load("data/henry_arrow2.dat");
+        if (a2.frames.empty()) {
+            std::printf("[object] henry_arrow2.dat ausente — pulando\n");
+        } else {
+            const dat::Frame* fl = a2.frame(0);
+            CHECK(fl && fl->state == lf2::OST_PIERCING,
+                  "henry_arrow2 voa em state 3006 (perfurante)");
+            lf2::Object o;
+            o.spawn(&a2, 0, 500.f, 363.f, 400.f, true, 0, 0, 22.f, 0.f);
+            CHECK(!o.spent(), "state 3006 não é gasto ao conectar");
+            int before = o.f.frameId;
+            o.onHit();
+            CHECK(o.f.frameId == before,
+                  "acertar não manda a flecha 3006 para o frame hiting (10)");
+            CHECK(o.f.vx > 0.f, "…e ela mantém a velocidade de voo");
+
+            // A bola comum (state 3000) continua se gastando no primeiro corpo.
+            dat::File db = dat::load("data/dennis_ball.dat");
+            if (!db.frames.empty()) {
+                lf2::Object b;
+                b.spawn(&db, 0, 500.f, 363.f, 400.f, true, 0, 0, 15.f, 0.f);
+                CHECK(b.spent(), "bola state 3000 é gasta ao conectar");
+                b.onHit();
+                CHECK(b.f.frameId == lf2::oid_frame::HITING,
+                      "…e vai para o frame hiting (10)");
+            }
+
+            // vrest é por VÍTIMA: acertar o alvo 0 não pode travar o alvo 1.
+            lf2::Object p;
+            p.spawn(&a2, 0, 500.f, 363.f, 400.f, true, 0, 0, 22.f, 0.f);
+            p.victimRest[0] = 15;
+            CHECK(p.victimRest[1] == 0,
+                  "vrest de uma vítima não bloqueia as outras");
+            for (int t = 0; t < 15; ++t) p.tick();
+            CHECK(p.victimRest[0] == 0, "o vrest por vítima decai a cada tick");
+        }
+    }
+
     if (g_fail) { std::printf("\n%d CHECK(S) FAILED\n", g_fail); return 1; }
     std::printf("\nall object tests passed\n");
     return 0;

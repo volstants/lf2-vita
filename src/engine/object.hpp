@@ -34,6 +34,9 @@ enum ObjState {
     // (frames 1-9, 100-104, the explosion 110-117), NOT in 3000 — so a hit test
     // that only accepted 3000/3005 let Firen's fire pass through everyone.
     OST_FIRE         = 18,
+    // 3006 = PIERCING. henry_arrow2.dat (Henry's charged "super arrow", oid 208)
+    // flies its whole life in 3006. See Object::onHit for what that buys it.
+    OST_PIERCING     = 3006,
 };
 
 // Canonical ball frame ids.
@@ -63,7 +66,23 @@ struct Object {
     bool  active = false;
     int   team   = 0;       // 0 = player-owned, 1 = enemy-owned (no friendly fire)
     int   sheetSlot = -1;   // renderer texture bank slot for this object's dat
-    int   rehit = 0;        // re-hit timer vs victims (vrest-driven)
+    int   rehit = 0;        // re-hit timer vs WEAPONS (damageObjects, vrest-driven)
+    // Os DOIS temporizadores de re-acerto do original, que não são
+    // intercambiáveis e vivem em lugares de naturezas diferentes:
+    //
+    //  arest — ESCALAR do atacante (objeto+0xEC). Trava o golpe inteiro, contra
+    //          todas as vítimas. lf2.exe 0x0042f2f7 grava-o em TODO acerto,
+    //          inclusive quando o itr também tem vrest.
+    //  vrest — POR PAR (atacante, vítima). No original é um array de bytes na
+    //          VÍTIMA indexado pelo id do ATACANTE
+    //          (`vitima->vrest_of_objects[atacante]`, lf2.exe 0x0042f314).
+    //          Aqui mora no atacante indexado pela vítima: mesma relação de par,
+    //          virada do avesso, porque o nosso conjunto de vítimas é fixo e
+    //          pequeno. DIVERGÊNCIA DE LAYOUT, equivalência de comportamento.
+    //
+    // Índices: inimigos na ordem dos slots, jogador em [NUM_ENEMIES].
+    int   arest = 0;
+    int   victimRest[NUM_ENEMIES + 1] = {};
     int   ttl   = 0;        // safety despawn
     int   weaponType = 0;   // 0 = projectile; 1 = light weapon; 2 = heavy weapon
     bool  held = false;     // in a holder's hand — the holder drives position/frame
@@ -113,16 +132,35 @@ struct Object {
         return s == OST_FLYING || s == OST_FLYING_INERT || s == OST_FIRE;
     }
 
-    // May this object's itrs connect right now? Enumerating "active" states kept
-    // biting us: the wind flies in 3005, Firen's flame burns in 18, and
-    // freeze_column's damaging frames are state 15 — each one silently did no
-    // damage until its state was added. Invert the test instead: everything can
-    // hit EXCEPT the post-hit / dying states, which carry no itr anyway.
-    bool canHit() const {
-        int s = f.state();
-        return s != OST_HITING && s != OST_HIT &&
-               s != OST_REBOUNDING && s != OST_DISAPPEARING && s != OST_EFFECT;
-    }
+    // NOTE: there is deliberately no canHit()/state whitelist here. Whether an
+    // object's itrs connect is decided by its DATA, in main.cpp's projectile
+    // path: fighterAttack(o.f, ohi) succeeds only if the CURRENT frame carries an
+    // attack itr, and the spent states (hiting/hit/rebounding) drop their itr in
+    // the .dat, so they stop hurting on their own. A state list was tried and
+    // removed — it was never wired up, and its exclusions were already incomplete
+    // against the data (the object files also use states 9998, 9997 and 3006,
+    // none of which had an OST_* name).
+
+    // Does connecting SPEND this object (send it to its `hiting` frames)?
+    //
+    // SOURCE: lf2.exe, the attack-resolution code at 0x00430xxx (lf2_decomp.c
+    // lines 81204 and 81882 — both sites are guarded identically):
+    //
+    //     if (frames[attacker->frame_id].state == 3000) {
+    //         attacker->frame_id = 10;      // `hiting`
+    //         attacker->frame_wait = 0;
+    //         attacker->vx = 0;
+    //     }
+    //
+    // ONLY state 3000. Every other flying state passes straight through the
+    // victim and keeps its itr — that is the whole mechanism behind Henry's
+    // charged arrow (henry_arrow2.dat frames 0-5 are state **3006**), behind
+    // Henry's/Louis's wind (henry_wind.dat, 3005) and behind Firen's flames
+    // (state 18). We were calling setFrame(HITING) unconditionally, so the
+    // charged arrow died in the first body it touched.
+    // Corroborated by F.LF specialattack.js:213-247 — its 3006 'hit_others'
+    // handler only transitions when the victim is itself a 3005/3006 ball.
+    bool spent() const { return f.state() == OST_FLYING; }
 
     // Connected with someone. A ball plays its hit animation and stops; a thrown
     // weapon bounces back a little and keeps falling (F.LF: weapon.hit.vx = -3).
@@ -132,6 +170,7 @@ struct Object {
             f.vy = 0.f;
             return;
         }
+        if (!spent()) return;                 // 3005 / 3006 / 18 — pierce and fly on
         f.vx = 0; f.vy = 0;
         if (f.data && f.data->frame(oid_frame::HITING)) f.setFrame(oid_frame::HITING);
         else f.removed = true;
@@ -219,6 +258,8 @@ struct Object {
         if (!active) return;
         if (held) return;                        // holder drives position + frame
         if (rehit > 0) --rehit;
+        if (arest > 0) --arest;
+        for (int& vr : victimRest) if (vr > 0) --vr;
         if (weaponType > 0) {
             if (!thrown) {
                 // At rest. A weapon that belongs to the stage stays put forever,
@@ -252,6 +293,10 @@ struct Object {
         }
         f.x += f.vx;                             // projectile: dvx = flight speed
         f.y += f.vy;
+        f.z += vz;                               // …and dvz, for multi-spawn fans.
+        // vz is 0 for every ordinary spawn, so this only moves the copies emitted
+        // by create_multiple_objects — which is exactly how the original fans five
+        // arrows out: same launch point, different depth VELOCITY.
         int beforeId = f.frameId;
         f.advance();
         if (f.frameId < beforeId) {          // the chain wrapped backwards

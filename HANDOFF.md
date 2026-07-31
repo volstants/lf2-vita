@@ -34,6 +34,30 @@ branch de remaster aqui.
 **Divisão de trabalho:** Claude diagnostica, edita e valida no host (testes +
 compile-check). O usuário builda no device, testa e commita.
 
+### Protocolo de entrega (obrigatório)
+
+**Toda vez que qualquer arquivo do projeto for alterado** — correção de bug,
+feature nova, refactor, doc — a resposta termina com o bloco de build, pronto
+para colar no WSL:
+
+```bash
+cd /mnt/c/Users/rodrigo.chiesa/Documents/LittleFighter2Vita/build && cmake .. && make -j$(nproc)
+```
+
+Sem exceção e sem esperar o usuário pedir. O bloco vai mesmo quando as validações
+de host passaram: o host valida a lógica, não a toolchain do VitaSDK.
+
+**Quando uma versão major for confirmada**, acompanha também o link do commit:
+
+- Repositório: `https://github.com/volstants/lf2-vita`
+- Formato do link: `https://github.com/volstants/lf2-vita/commit/<sha>`
+- Comparação entre versões: `https://github.com/volstants/lf2-vita/compare/<sha_antigo>...<sha_novo>`
+
+Ressalva: **quem commita é o usuário**, então o SHA de um trabalho recém-feito só
+existe depois que ele commitar. Claude não deve inventar hash nem apresentar o
+HEAD atual como se fosse a entrega — o HEAD, durante uma sessão de edição, é
+sempre o commit *anterior* às alterações em curso.
+
 ## 3. Arquitetura
 
 ```
@@ -70,7 +94,7 @@ tools/ghidra_*.py         decompilação (ver seção 7)
 | Âncora | `player.x` É objectX; `left = x - centerx + box.x` | binário |
 | MP | começa em **200** (não cheio); especial cobra `frame.mp`; `mp<0` DRENA | F.LF |
 | `dvx`/`dvz` | SETAM velocidade | F.LF |
-| `dvy` | **ACUMULA** (`vy += dvy`) | F.LF |
+| `dvy` | **ACUMULA** (`vy += dvy`) e chega ao personagem via `Player::drainFrameDvy()` | F.LF |
 | `550` | zera a componente | .dat |
 | Folhas | stride 80px; fronteiras pic 0-69/70-139/140-209 | header |
 | Transparência | Dennis magenta; Firen/cenário/armas **PRETO** | assets |
@@ -167,7 +191,9 @@ que faltavam.
 Achados aplicados nesta auditoria:
 - **`vrest == 0` = ataque de ALVO ÚNICO** (class_global.c:204-230): o original
   compara `abs(attacker->x - injured->x)` e guarda só o mais próximo. Nós
-  acertávamos todos os inimigos sobrepostos com um soco. CORRIGIDO.
+  acertávamos todos os inimigos sobrepostos com um soco. CORRIGIDO no melee e
+  (a partir de 2026-07-30) também no caminho da ARMA NA MÃO, que montava
+  `whi.rest` a partir de `vrest` e mesmo assim varria os três inimigos.
 - **`itr` que causa dano**: aceita `kind != 1,2,7` (class_global.c:268). Censo dos
   67 `.dat` por `injury`: kind 6 tem **0 de 162 com injury** (é marcador de frame
   vulnerável em `broken_defend` 112-114 e `injured` 226-229 — ignorar está certo);
@@ -263,6 +289,38 @@ padding `int3` (sem o filtro, inflava para 2180 com 1573 stubs `swi(3)`).
 - **`0xCDCDCDCD` (-842150451)** = lixo do MSVC nos `.dat`; tratar como unset.
 - **`assets/*.png` estão no repo público** (sprites do Marti/Starsky Wong).
   Decisão do usuário: adiado. Ver STATUS.md.
+
+## 8b. Rodada de correções 2026-07-30 (2ª revisão externa)
+
+Os 10 achados foram corrigidos. Dois mudam número do harness, e a explicação
+importa mais do que o número:
+
+| roster | antes | depois | |
+|---|---|---|---|
+| dennis | 14205 | 8990 | ↓ |
+| davis | 7470 | 7470 | = |
+| woody | 13230 | 2835 | ↓ |
+| firen | 19998 | 3337 | ↓ |
+| freeze | 0 | 0 | = (pré-existente) |
+| rudolf | 10610 | 10651 | = |
+| louis | 10210 | 12240 | ↑ |
+| henry | 1420 | **5410** | ↑ (a anomalia da 1ª revisão) |
+
+Bissecção (variantes compiladas, uma mudança por vez):
+- **Todo o delta vem de dois hunks**: o `vz_array` do multi-spawn (#6) e o dvy
+  religado (#2). `#3/#5/#7/#8/#9/#10` são neutros em tudo que o harness alcança.
+- O dvy religado é o que tira henry de 1420 para 5410.
+- `dano que estaciona` do Rudolf continua sadio: 18000→10651, 54000→32098.
+- Pool sadio em todos: pico 25/48, 0 ticks cheio, 0 spawns descartados.
+
+**Achado NOVO, não corrigido (fora do escopo da revisão):** o pouso cancela
+ataque para o frame 0. F.LF (`character.js:106-121`) prevê o pouso e vai para
+**215 (crouch)** ou **219 (crouch2)** via `state_update('fall_onto_ground')`,
+nunca para `standing`. Enquanto o dvy era dado morto isso quase não aparecia;
+agora que `rudolf 274 jump_sword` (dvy -7) e `woody 253 fly_crash` (dvy -7)
+realmente decolam, a cadeia do golpe é truncada no pouso — é a causa direta das
+quedas de dennis/woody/firen na tabela acima. Corrigir isso é a próxima tarefa
+de fidelidade, e deve devolver boa parte desse dano.
 
 ## 9. Próximos passos
 

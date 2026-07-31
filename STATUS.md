@@ -1,3 +1,80 @@
+# LF2 Vita — Estado da sessão (2026-07-30)
+
+## Sessão 2026-07-30 — gate de `effect` do itr, fogo no ar, bolas perfurantes
+
+Quatro sintomas reportados no device viraram **seis achados independentes**. Não
+compartilham raiz: cada um leva sua própria cadeia de evidências. Sintoma 2
+sozinho continha três mecanismos distintos (A2/A3/A4).
+
+### A1 — itr `effect` não tinha gate nenhum
+*Sintoma:* Firen toma dano e perde a corrida em chamas ao encostar em alvo
+queimando. Os frames 203-206 (`fire`) de TODO personagem carregam
+`itr kind:0 injury:30 fall:70 effect:20` — um corpo em chamas irradia fogo.
+*Evidência (lf2.exe, `FUN_00417400` @0x417400):* cadeia de early-outs antes de
+qualquer teste de caixa; itr = `piVar8` stride 0x50, `effect` em `piVar8[0xb]`
+(+0x2c). `effect 4` vs personagem · `effect 20` vs não-personagem/state 18/19 ·
+`effect 21` vs state 18/19 · `effect 30` vs frames 200-202 · `effect 2` com
+atacante em state 19 e vítima em state 18.
+**Divergência de fonte:** OpenLF2 `class_global.c:52-73` rotula as duas primeiras
+como 2 e 20; o binário usa **20 e 21**. Vale o binário.
+*Correção:* `lf2::itrEffectAllows()`, aplicado nos 4 caminhos de ataque.
+
+### A2 — re-acendimento infinito (consequência de A1)
+*Sintoma:* alvo queimando nunca desaba. O itr `effect: 2` da corrida em chamas
+(vrest 10) reacendia a vítima a cada 10 ticks, antes dos 36 TU de `BURN_TICKS`.
+*Evidência:* a mesma regra de A1 (`effect 2` + atacante state 19 + vítima state
+18). Medido: 200 ticks, sempre state 18.
+
+### A3 — `airborneTick()` apagava o state 18/13
+*Sintoma:* pegar fogo no ar cancelava o fogo (pose de pulo sobrescrevia 203).
+*Evidência (lf2.exe 0x0040e893-0x0040e8c5, em `FUN_0040e490`):* o original faz o
+oposto — mantém o state 18 no ar e ainda lhe dá frames próprios:
+```
+mov  0x70(%esi),%eax            ; frame_id
+cmpl $0x12,0x7ac(%edx,%ecx,1)   ; frames[frame_id].state == 18 ?
+cmp  $0xcd,%eax                 ; frame_id < 205 ?
+fcompl 0x48(%esi)               ; 1.0 vs object->vy
+movl $0xcd,0x70(%esi)           ; frame_id = 205
+```
+*Correção:* state 18/13 preservados em `airborneTick()` e no pouso; **e** a
+troca 203/204 → 205/206 quando `vy > 1.0`, que faltava por completo (era a
+"pendência" da revisão anterior — não é pendência, é comportamento evidenciado).
+
+### A4 — expiração do fogo com `knockedDown` já ligado — **INFERÊNCIA**
+*Sintoma:* vítima trava em pé dentro do frame 180 (`next: 0` = segura).
+*Evidência:* NENHUMA no binário. `knockedDown` é bookkeeping nosso, sem
+contrapartida no original (o LF2 lê tudo do state do frame). É correção interna
+de porte, não de fidelidade. Marcado como tal.
+
+### A5 — knockback zerado em re-acerto no ar
+*Sintoma:* tiro concentrado do Henry às vezes não derruba.
+*Evidência (lf2.exe, disassembly em 0x0042ee5b / 0x0042ee6d / 0x0042eee5):*
+```
+42ee58:  fildl  0x14(%edx)   ; itr->dvx (+0x14)
+42ee5b:  faddl  0x28(%eax)   ; + injured->x_velocity (+0x28)
+42ee5e:  fstpl  0x28(%eax)
+42ee6d:  fsubrl 0x28(%eax)   ; espelho para o outro facing
+```
+Nenhum ramo consulta o estado aéreo/fall da vítima: os testes ao redor são sobre
+`file->type` (4/6) e `effect` (0x16/0x17). O nosso `lv = juggle ? 0.f : …` era
+invenção sem fonte — o próprio comentário admitia.
+
+### A6 — `onHit()` gastava toda bola no primeiro corpo
+*Sintoma:* a flecha concentrada quebra no primeiro alvo. `henry_arrow2.dat` voa
+em **state 3006**.
+*Evidência (lf2.exe, lf2_decomp.c 81204 e 81882 — dois sítios idênticos):* o
+atacante só vai ao frame `hiting` se `frames[frame_id].state == 3000`. Corroborado
+por F.LF `specialattack.js:213` **apenas como fonte secundária**.
+*Correção:* `Object::spent()` + `victimRest[]` por vítima (o original indexa
+arest/vrest por id; um contador único tornava toda bola single-target).
+
+### Validação do PORTE (não é evidência de fidelidade)
+216 CHECKs verdes (19 novos), `check-main` contra headers SDL2 reais, harness de
+3600-5400 ticks limpo (pico 27/48 do pool, 0 descartes). Demonstra apenas que
+nada regrediu e que o comportamento mudou como esperado.
+
+---
+
 # LF2 Vita — Estado da sessão (2026-07-29)
 
 ## LIÇÃO DA SESSÃO — ler o binário direto (ver tools/BINARY_NOTES.md)
