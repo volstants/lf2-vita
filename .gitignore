@@ -36,3 +36,4 @@ desktop.ini
 
 # host SDL2 headers for compile-checking (tools/host_sdl.sh)
 .sdlhost/
+lf2vita.log

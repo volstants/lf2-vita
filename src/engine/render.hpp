@@ -2,6 +2,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include "types.hpp"
+#include "log.hpp"
 
 // ── Texture loader ────────────────────────────────────────────────────────────
 // colorKey=true  → magenta (255,0,128) is transparent (character sprites)
@@ -12,10 +13,13 @@
 inline SDL_Texture* loadTex(SDL_Renderer* r, const char* path, bool colorKey = true,
                             Uint8 kr = 255, Uint8 kg = 0, Uint8 kb = 128) {
     SDL_Surface* s = IMG_Load(path);
-    if (!s) return nullptr;
+    // Era `if (!s) return nullptr;` mudo. O sintoma no device era sprite
+    // invisível sem nenhuma pista de qual arquivo faltava.
+    LF2_CHECK(s, nullptr, "IMG_Load falhou: %s (%s)", path, IMG_GetError());
     if (colorKey) SDL_SetColorKey(s, SDL_TRUE, SDL_MapRGB(s->format, kr, kg, kb));
     SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
     SDL_FreeSurface(s);
+    LF2_WARN(t, "CreateTextureFromSurface falhou: %s (%s)", path, SDL_GetError());
     return t;
 }
 

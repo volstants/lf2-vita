@@ -1,3 +1,95 @@
+# Roteiro de teste no device — entrega 2026-07-30 (auditoria de assembly)
+
+Cobre os seis achados da `AUDITORIA_2026-07-30.md`. Nada validado em hardware:
+só suíte host (222 CHECKs), harness headless (dennis e henry) e compile-check.
+
+Marque `OK` / `ERRO` + uma linha do que viu. **[N]** = comportamento novo ·
+**[R]** = regressão que não pode ter voltado · **[!]** = risco assumido nesta
+entrega, olhar com atenção redobrada.
+
+```
+cd /mnt/c/Users/rodrigo.chiesa/Documents/LittleFighter2Vita/build && cmake .. && make -j$(nproc)
+```
+
+---
+
+## 1. Gate de `itr->effect` — A1 (lf2.exe 0x00417400)
+
+| # | Teste | Esperado |
+|---|---|---|
+| 1 | Firen em corrida em chamas atravessa alvo **já queimando** | Firen **não** toma dano e **não** é interrompido **[N]** |
+| 2 | Alvo parado dentro do fogo do chão do Firen | queima 36 TU e **desaba**; não reacende em ciclo **[N]** |
+| 3 | Alvo queimando levando fogo de novo | HP **não** cai a cada nova chama **[N]** |
+| 4 | Firen acerta fogo em quem **não** está queimando | acende normalmente **[R]** |
+| 5 | Soco comum do Dennis (effect 0) | acerta normalmente **[R]** |
+| 6 | Freeze: gelo em quem já está congelado (frames 200-202) | não reinicia a cadeia **[R]** |
+
+## 2. Fogo no ar e frames 205/206 — A2 (0x0040e893)
+
+| # | Teste | Esperado |
+|---|---|---|
+| 7 | Incendiar alvo em **pleno salto** | continua em chamas; a pose de pulo **não** apaga o fogo **[N]** |
+| 8 | Observar a **descida** do alvo em chamas | troca para a pose horizontal (frames 205/206), sprite deitado **[N]** |
+| 9 | Alvo em chamas **aterrissa** | continua queimando no chão até o fim do cronômetro **[N]** |
+| 10 | Congelar alvo em pleno salto | idem: o gelo sobrevive ao voo e ao pouso **[N]** |
+| 11 | Pulo comum, sem fogo/gelo | pose de pulo normal (210/211/212) **[R]** |
+
+## 3. Knockback em re-acerto — A3 (0x0042ee5b)
+
+| # | Teste | Esperado |
+|---|---|---|
+| 12 | Segundo projétil num alvo **já caindo** | o alvo é **empurrado na horizontal**, não só re-erguido no lugar **[N]** |
+| 13 | Combo de socos em alvo em pé | tranco por faixa de FP, como antes **[R]** |
+| 14 | Golpe pesado de primeira (fall 70) | arremesso longo, como antes **[R]** |
+
+## 4. Bola perfurante — A4 (0x0042f0bf / 0x00430536)
+
+| # | Teste | Esperado |
+|---|---|---|
+| 15 | Henry, tiro concentrado, 2+ inimigos **alinhados** | a flecha **atravessa** e acerta todos **[N]** |
+| 16 | Mesmo tiro, alvo único | derruba de primeira, sempre **[N]** |
+| 17 | Bola do Dennis / Davis (state 3000) | ainda **some** no primeiro corpo **[R]** |
+| 18 | Flecha comum do Henry (arma leve, oid 201) | ainda krava/cai; não atravessa **[R]** |
+| 19 | Vento do Henry (state 3005) | agora **atravessa**; conferir que não fica preso na tela **[!]** |
+| 20 | Chamas do Firen (state 18) | agora **atravessam**; conferir que não causam dano contínuo absurdo **[!]** |
+
+## 5. `arest` × `vrest` — A5 (0x0042f2c8)
+
+| # | Teste | Esperado |
+|---|---|---|
+| 21 | Soco simples repetido no mesmo alvo | cadência de re-acerto **mais rápida** que antes (piso caiu de 8 para 4 TU) **[!]** |
+| 22 | Golpe de rodopio / many_foot (tem `vrest`) | continua acertando várias vezes, cadência inalterada **[R]** |
+| 23 | Flecha perfurante contra o **mesmo** alvo | não re-acerta antes de 15 TU **[N]** |
+| 24 | Dois inimigos, golpe com `vrest` | travar um **não** impede acertar o outro **[N]** |
+
+## 6. Regressões gerais **[R]**
+
+| # | Teste | Esperado |
+|---|---|---|
+| 25 | Partida completa contra 3 inimigos | ninguém fica imortal, preso ou invisível |
+| 26 | Pegar, usar e arremessar arma | sem mudança |
+| 27 | Especiais de Firen, Henry, Dennis, Louis, Rudolf | disparam e causam dano |
+| 28 | Sessão longa (5+ min) | sem engasgo, sem pool de objetos entupindo |
+
+---
+
+## Riscos assumidos nesta entrega (não são bugs a reportar, são o que vigiar)
+
+**Piso do `arest` caiu de 8 para 4 TU** (itens 21). O 8 era invenção; o 4 vem do
+assembly (`0x0042f2e4`). Efeito colateral: todo golpe **sem** `vrest` re-acerta
+cerca de duas vezes mais rápido. É a mudança com maior impacto na sensação de
+jogo desta entrega. Se os combos ficarem fáceis demais, é aqui.
+
+**Objetos em state 18 / 3005 / 3006 deixaram de se gastar** (itens 19, 20). O
+binário só manda ao frame `hiting` quem está em 3000. Chamas e vento agora
+persistem — comportamento fiel, mas é a primeira vez que roda no device.
+
+**Teto de `arest` em 12 NÃO foi aplicado** (achado A7, "não foi possível
+comprovar"). 143 itrs usam `arest`, 51 deles com valor 15. Se o espaçamento de
+algum golpe multi-hit parecer longo demais, é o candidato número um.
+
+---
+
 # Roteiro de teste no device — acumulado desde o último reteste
 
 Cobre **tudo** que mudou desde o seu último retorno (o teste do modo auditoria que

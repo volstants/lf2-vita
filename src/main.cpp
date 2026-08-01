@@ -31,6 +31,14 @@ constexpr int ROSTER_N = 8;
 // Where packaged files live. On the Vita everything is under app0:/; a host
 // build (LF2_HOST) runs straight out of the repo, which is what lets the whole
 // game loop be exercised headless with SDL_VIDEODRIVER=dummy.
+// Log de diagnostico. Na Vita vai para ux0:data/, que sobrevive ao fechamento
+// do app e e' acessivel por FTP/USB sem reinstalar o VPK.
+#ifdef LF2_HOST
+static const char* LOG_PATH = "lf2vita.log";
+#else
+static const char* LOG_PATH = "ux0:data/lf2vita.log";
+#endif
+
 #ifdef LF2_HOST
 static const std::string APP = "";
 #else
@@ -751,12 +759,29 @@ int main(int argc, char* argv[]) {
 #else
     (void)argc; (void)argv;
 #endif
-    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK);
-    IMG_Init(IMG_INIT_PNG);
+    lf2::logOpen(LOG_PATH);
+    lf2::logLine("INFO", "LF2 Vita v0.8.0 iniciando");
+
+    // Os tres retornos abaixo nunca eram verificados. Falha em qualquer um deles
+    // dava tela preta sem diagnostico nenhum.
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0) {
+        lf2::logLine("ERRO", "SDL_Init: %s", SDL_GetError());
+        lf2::logClose();
+        return 1;
+    }
+    if ((IMG_Init(IMG_INIT_PNG) & IMG_INIT_PNG) == 0) {
+        lf2::logLine("ERRO", "IMG_Init sem suporte a PNG: %s", IMG_GetError());
+        SDL_Quit(); lf2::logClose();
+        return 1;
+    }
 
     g_index = dat::loadIndex((APP + "data/data.txt").c_str());
-    for (int i = 0; i < ROSTER_N; i++)
+    for (int i = 0; i < ROSTER_N; i++) {
         g_chars[i].data = dat::load((APP + "data/" + ROSTER[i] + ".dat").c_str());
+        // Um roster com personagem vazio so' aparecia como boneco imovel em jogo.
+        LF2_WARN(!g_chars[i].data.frames.empty(),
+                 "roster[%d] (%s) carregou sem frames", i, ROSTER[i]);
+    }
 
     SDL_Joystick* joy = nullptr;
     if (SDL_NumJoysticks() > 0) joy = SDL_JoystickOpen(0);
@@ -764,7 +789,24 @@ int main(int argc, char* argv[]) {
     SDL_Window*   win = SDL_CreateWindow("LF2 Vita v0.8.0",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         SCREEN_W, SCREEN_H, SDL_WINDOW_SHOWN);
+    if (!win) {
+        lf2::logLine("ERRO", "SDL_CreateWindow: %s", SDL_GetError());
+        IMG_Quit(); SDL_Quit(); lf2::logClose();
+        return 1;
+    }
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
+    if (!ren) {
+        // Vale tentar o software renderer antes de desistir: num device com o
+        // driver acelerado indisponivel isso e' a diferenca entre jogar e nao abrir.
+        lf2::logLine("AVISO", "SDL_CreateRenderer acelerado falhou (%s); tentando software",
+                     SDL_GetError());
+        ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
+    }
+    if (!ren) {
+        lf2::logLine("ERRO", "SDL_CreateRenderer: %s", SDL_GetError());
+        SDL_DestroyWindow(win); IMG_Quit(); SDL_Quit(); lf2::logClose();
+        return 1;
+    }
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
 
     Scene scene;
@@ -1489,6 +1531,8 @@ int main(int argc, char* argv[]) {
     SDL_DestroyWindow(win);
     IMG_Quit();
     SDL_Quit();
+    lf2::logLine("INFO", "saida normal");
+    lf2::logClose();
 #ifndef LF2_HOST
     sceKernelExitProcess(0);
 #endif

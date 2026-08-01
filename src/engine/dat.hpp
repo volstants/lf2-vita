@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include "log.hpp"
 
 namespace dat {
 
@@ -50,7 +51,9 @@ inline std::vector<uint8_t> encrypt(const std::string& plain) {
 // Load a .dat from disk; auto-detects plaintext vs encrypted.
 inline std::string loadText(const char* path) {
     FILE* f = std::fopen(path, "rb");
-    if (!f) return {};
+    // Antes: `return {}` mudo. Um .dat ausente produzia um File sem frames e o
+    // jogo seguia com um personagem que não anima nem colide.
+    LF2_CHECK(f, {}, "nao abriu: %s", path);
     std::fseek(f, 0, SEEK_END);
     long n = std::ftell(f);
     std::fseek(f, 0, SEEK_SET);
