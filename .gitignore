@@ -41,3 +41,7 @@ lf2vita.log
 # Sprites do LF2 original — copyright Marti/Starsky Wong
 assets/
 !sce_sys/**/*.png
+
+# Sprites do LF2 original — copyright Marti/Starsky Wong
+assets/
+!sce_sys/**/*.png
