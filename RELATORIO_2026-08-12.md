@@ -256,120 +256,115 @@ git push
 
 ### Passo 2 — o prompt de abertura
 
-Cole isto no chat novo:
+Um prompt só, já com o plano da sessão embutido. Copiar inteiro:
 
 ```
-Projeto LF2 Vita, pasta LittleFighter2Vita.
+Projeto LF2 Vita, pasta LittleFighter2Vita. Port nativo do Little Fighter 2 para
+PS Vita em C++17, interpretando os .dat originais em runtime.
 
-Leitura obrigatória antes de qualquer coisa, nesta ordem:
-  1. RELATORIO_2026-08-12.md      — índice da sessão anterior e o método
-  2. AUDITORIA_SUPERFICIE.md      — taxa-base de 9/9 e os dois vícios de processo
-  3. AUDITORIA_2026-08-12.md      — achados A8-A13 e identificação do binário
-  4. tools/BINARY_NOTES.md        — receitas de leitura do binário
-
+═══ LEITURA OBRIGATÓRIA, NESTA ORDEM ═══
+  1. RELATORIO_2026-08-12.md    índice da sessão anterior e o método
+  2. AUDITORIA_SUPERFICIE.md    taxa-base de 9/9 e os dois vícios de processo
+  3. AUDITORIA_2026-08-12.md    achados A8-A13 e identificação do binário
+  4. tools/BINARY_NOTES.md      receitas de leitura do binário
 (AUDITORIA_2026-07-30.md tem A1-A7; leia se o assunto encostar neles.)
 
-PRECEDÊNCIA — os 11 .md do repo NÃO concordam entre si, e isso é conhecido.
-Quando dois discordarem, vale nesta ordem:
+═══ PRECEDÊNCIA ═══
+Os 13 .md do repo NÃO concordam entre si, e isso é conhecido. Quando dois
+discordarem:
   1. AUDITORIA_*.md            achado com endereço no binário — SEMPRE vence
   2. AUDITORIA_SUPERFICIE.md   diz o que ainda NÃO tem evidência
   3. RELATORIO_2026-08-12.md   índice e ponto de retomada
   4. HANDOFF / STATUS /        contexto, histórico e roadmap.
      CHECKLIST / TESTPLAN      NUNCA fonte de parâmetro de mecânica.
+Os de nível 4 têm banner no topo dizendo isso. Número neles sem endereço do
+binário é suspeito por padrão — cinco parâmetros refutados já estavam em
+HANDOFF.md sob o título "VALIDADOS".
 
-Os arquivos de nível 4 têm banner no topo dizendo isso. Se você encontrar um
-número neles sem endereço do binário, ele é suspeito por padrão — três
-contradições reais já foram achadas e corrigidas em 2026-08-12, incluindo cinco
-parâmetros refutados que estavam em HANDOFF.md sob o título "VALIDADOS".
+═══ MÉTODO (Metodologia S) ═══
+Você é auditor de fidelidade, não implementador com pressa.
 
-Ferramentas nossas, use antes de sair desassemblando à mão:
-  tools/struct_harvest.py     inventário de campos por deslocamento num intervalo
-                              do .text. Saída é Nível D: o script não sabe para
-                              qual struct o registrador-base aponta.
-  tools/fn_boundary_check.py  187 dos 481 FUN_ do lf2_decomp.c não são entrada
-                              de função. Confira antes de citar pseudocódigo.
-  tools/datdump               parser dos .dat, imprime itr com arest/vrest.
+Ordem obrigatória das fontes:
+  A  lf2.exe, disassembly (objdump)          única fonte primária
+  B  reference/decomp/lf2_decomp.c           índice, NÃO fonte
+  C  reference/OpenLF2/                      bom para NOMES de campo
+  D  reference/F.LF/, docs de comunidade     último recurso
 
-Metodologia S em vigor: você é auditor de fidelidade. Ordem obrigatória —
-localizar a rotina no lf2.exe, desassemblar, reconstruir o fluxo, e só então
-consultar decompilação; OpenLF2 se necessário; F.LF por último. Níveis de
-evidência A/B/C/D declarados em cada achado. Achado = Identificador,
-Severidade, Comportamento do engine, Divergência, Reprodução, Evidência,
-Conclusão. Mudanças de código em seção separada "IMPLEMENTAÇÃO DO PORTE".
-Testes e build em "VALIDAÇÃO DO PORTE (não é evidência de fidelidade)".
+Localizar a rotina no lf2.exe → desassemblar → reconstruir o fluxo → só então
+consultar decompilação. Declare o nível de evidência em cada afirmação.
+
+Formato de achado: Identificador · Severidade · Comportamento do engine (sem
+mencionar o porte) · Divergência encontrada · Reprodução · Evidência ·
+Conclusão (Compatível / Divergente / Não foi possível comprovar / Inferência).
+
+Mudanças de código vão em seção separada "IMPLEMENTAÇÃO DO PORTE".
+Testes e build vão em "VALIDAÇÃO DO PORTE (não é evidência de fidelidade)".
 
 Nada entra no porte sem endereço do binário. Se não der para provar, o veredito
-é "não foi possível comprovar" — não é para preencher com inferência plausível.
+é "não foi possível comprovar" e passa para o próximo item — não é para
+preencher com inferência plausível. Proximidade de vizinhança não é evidência
+(já custou o candidato +0xEA). Coincidência numérica não é evidência (o -8.0 em
+0x448340 coincide com o nosso launch(-8.f) e é outra coisa).
 
-Tarefa desta sessão: <ESCOLHA UM DOS BLOCOS ABAIXO>
+═══ FERRAMENTAS NOSSAS — usar antes de desassemblar à mão ═══
+  tools/struct_harvest.py     inventário de campos por deslocamento num
+                              intervalo do .text. Saída é Nível D: o script não
+                              sabe para qual struct o registrador-base aponta.
+  tools/fn_boundary_check.py  187 dos 481 FUN_ do lf2_decomp.c não são entrada
+                              de função. Rode antes de citar pseudocódigo.
+  tools/datdump               parser dos .dat, imprime itr com arest/vrest.
+  make -f Makefile.host test  238 CHECKs, host, segundos.
+  make -f Makefile.host check-main   type-check contra headers SDL2 reais.
 
-Protocolo de entrega: toda vez que um arquivo mudar, me mande o comando de build.
-Quando fechar uma versão major, me mande também o comando de commit.
+═══ PLANO DA SESSÃO — nesta ordem, avançando o máximo que der ═══
+
+1. VELOCIDADES DE TOMBO  (item 2 de AUDITORIA_SUPERFICIE.md, RISCO ALTO)
+   launch(-8.f) e vy = -6.f são invenção. Governam a sensação de todo knockdown.
+   Alvo: FUN_0042e100 — a MESMA rotina de A8-A12. Leia os achados antes: a
+   acumulação de fall, a saturação no piso da faixa e a seleção 222/224 já estão
+   provadas com endereço; não redescubra.
+   Comece por:
+     python3 tools/struct_harvest.py reference/decomp/lf2.exe 0x42e100 0x430200
+   Isolar que constante do pool o ramo de tombo carrega para y_velocity (+0x40)
+   ou vy (+0x48). Candidatos, não evidência: ±6.0 em 0x447940/0x449af0 e ±3.0 em
+   0x447a40/0x449050.
+
+2. CAMPOS CANDIDATOS  (84 deslocamentos que o struct_harvest achou)
+   Na ordem de volume: +0x194 (tabela global de objetos, 289 leituras), +0x354
+   (índice de slot, usado como índice em +0x194), +0x300/+0x348/+0x34C
+   (acumuladores, só escrita via add), e os oito bytes consecutivos em
+   +0xBE-0xC5 (comparados com 5 em 0x40e17a).
+   O que já se sabe de cada um está em RELATORIO §3.4, incluindo a leitura
+   parcial de +0x354 em 0x0042e9af-0x0042e9c3.
+   Cada campo só vira afirmação depois de confirmado no disassembly — o base
+   pode ser object_t, itr, bdy ou frame.
+
+3. mp_start E REGENERAÇÃO DE MP  (itens 4 e 5 da superfície)
+   mp = 200 é F.LF; a regen de 1 a cada 2 ticks é invenção pura, sem fonte
+   nenhuma. Ambos são movl na inicialização — baratos de verificar.
+
+4. FECHAMENTO
+   Atualizar AUDITORIA_2026-08-12.md (ou abrir AUDITORIA da data nova) com os
+   achados, AUDITORIA_SUPERFICIE.md com o que saiu e o que entrou, e
+   RELATORIO com o novo ponto de retomada.
+
+Se travar num item, diga por que travou e vá para o próximo. Sessão que fecha um
+item com prova vale mais que sessão que fecha três com inferência.
+
+═══ FORA DO PLANO, MAS PRIORITÁRIO SE ACONTECER ═══
+Se eu voltar com resultado de teste no device (TESTPLAN.md, 39 itens, nenhum
+executado ainda), isso passa na frente de tudo.
+
+═══ PROTOCOLO DE ENTREGA ═══
+Toda vez que um arquivo mudar, me mande o comando de build. Quando fechar uma
+versão major, me mande também o comando de commit.
 ```
-
-### Passo 3 — escolher a tarefa
-
-Três opções, em ordem de retorno esperado:
-
-**(a) Velocidades de tombo — maior retorno de fidelidade.**
-```
-Fechar o item 2 de AUDITORIA_SUPERFICIE.md: as velocidades de lançamento do
-knockdown. Hoje são launch(-8.f) e vy = -6.f, ambas inventadas.
-
-O alvo é FUN_0042e100, a MESMA rotina que A8-A12 já auditaram — leia esses
-achados antes de tocar no disassembly, porque a acumulação de fall, a saturação
-no piso da faixa e a seleção 222/224 já estão provadas com endereço e não é para
-redescobrir nada disso.
-
-Comece rodando:
-  python3 tools/struct_harvest.py reference/decomp/lf2.exe 0x42e100 0x430200
-para ter o inventário de deslocamentos do bloco antes de ler linha por linha.
-
-Depois isolar quais constantes do pool o ramo de tombo carrega para y_velocity
-(+0x40) ou vy (+0x48). Candidatos conhecidos: ±6.0 em 0x447940/0x449af0 e ±3.0
-em 0x447a40/0x449050 — ambos são candidatos, nenhum é evidência ainda.
-
-Atenção à armadilha já registrada: o -8.0 em 0x448340 COINCIDE com o nosso
-launch(-8.f), mas ali ele é limiar de seleção de frame, não velocidade. A
-coincidência é enganosa e não serve de prova.
-
-Se não der para isolar, o veredito é "não foi possível comprovar" e a sessão
-para aí. Não preencher com inferência plausível.
-```
-
-**(b) Colher os campos candidatos — maior retorno estrutural.**
-```
-Rodar tools/struct_harvest.py sobre as faixas do .text ainda não auditadas e
-atacar os candidatos de maior volume, na ordem: +0x194 (tabela global de
-objetos, 289 leituras), +0x354 (índice de slot, usado como índice em +0x194),
-+0x300/+0x348/+0x34C (acumuladores, só escrita via add) e os oito bytes
-consecutivos em +0xBE-0xC5 (comparados com 5 em 0x40e17a).
-
-A seção 3.4 de RELATORIO_2026-08-12.md tem o que já se sabe de cada um, e a
-leitura parcial de +0x354 em 0x0042e9af-0x0042e9c3.
-
-Regra: a saída do script é Nível D. O registrador-base pode ser object_t, itr,
-bdy ou frame, e o script não distingue — a prova de que isso importa está na
-própria saída, onde 0x2c aparece com 16 leituras sendo na verdade itr->effect.
-Cada campo só vira afirmação depois de confirmado no disassembly.
-```
-
-**(c) Testar no device.**
-```
-Nada de assembly nesta sessão. Vamos executar TESTPLAN.md, itens 1-39, e
-registrar o que diverge. Eu rodo no device e te mando o resultado.
-```
-
-Se quiser o meu palpite: **(a)**, porque é o item de risco ALTO que sobrou e
-afeta toda sensação de combate. **(b)** é o que mais acelera as sessões
-seguintes. **(c)** é o que deveria ter acontecido há duas sessões — há muita
-correção acumulada sem validação em hardware real.
 
 ---
 
 ## 6. Precedência entre documentos — e o conflito que já existia
 
-São 11 arquivos `.md`, escritos ao longo de três semanas, e **eles não
+São 13 arquivos `.md`, escritos ao longo de três semanas, e **eles não
 concordam entre si**. Auditoria feita em 2026-08-12; três conflitos reais foram
 encontrados e corrigidos:
 
