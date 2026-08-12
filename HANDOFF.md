@@ -11,6 +11,16 @@
 
 ## 1. Projeto
 
+> **Identificação do binário de referência.** `reference/decomp/lf2.exe` é o
+> **LF2 v2.0a**, build de **2009-07-10 17:15:35 UTC** (`TimeDateStamp` =
+> `0x4a577737` no cabeçalho PE), SHA256
+> `12dfa00f6b767508612550e9ab27ab74b4201ff4cb9ff31d068925924eab8fc5`.
+> PE32 i386, MSVC 8.0, sem packer. **Não** é o build de 1999 — v2.0a é o último
+> lançamento oficial e é o que a comunidade chama de "LF2 original" hoje, mas a
+> distinção importa: onde estes documentos dizem "o original", leia-se
+> "LF2 v2.0a". Os `.dat` interpretados vêm da mesma instalação.
+
+
 Engine nativo de **Little Fighter 2** para **PS Vita**, em C++17, que **interpreta
 os `.dat` originais** em runtime. Nada de lógica de personagem hardcoded: um
 `Fighter` genérico lê qualquer `.dat`; a diferença entre personagens está 100%

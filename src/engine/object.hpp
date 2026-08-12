@@ -132,14 +132,9 @@ struct Object {
         return s == OST_FLYING || s == OST_FLYING_INERT || s == OST_FIRE;
     }
 
-    // NOTE: there is deliberately no canHit()/state whitelist here. Whether an
-    // object's itrs connect is decided by its DATA, in main.cpp's projectile
-    // path: fighterAttack(o.f, ohi) succeeds only if the CURRENT frame carries an
-    // attack itr, and the spent states (hiting/hit/rebounding) drop their itr in
-    // the .dat, so they stop hurting on their own. A state list was tried and
-    // removed — it was never wired up, and its exclusions were already incomplete
-    // against the data (the object files also use states 9998, 9997 and 3006,
-    // none of which had an OST_* name).
+    // Se um objeto conecta e' decidido pelos DADOS — o frame corrente carrega
+    // um itr de ataque ou nao. Se ele se GASTA ao conectar e' outra pergunta, e
+    // essa tem resposta no binario: so' state 3000. Ver spent() abaixo.
 
     // Does connecting SPEND this object (send it to its `hiting` frames)?
     //

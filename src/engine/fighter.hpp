@@ -54,9 +54,10 @@ enum State {
     ST_ICE        = 13,
     ST_LYING      = 14,
     ST_SPECIAL    = 15,  // throws / super moves / misc scripted frames
-    ST_BURNING    = 18,  // on fire (frames 203-206). Loops in the data; the exit
-                         // is external (F.LF locks it for 36 TU, then the victim
-                         // collapses — state 18 delegates to falling on landing).
+    ST_BURNING    = 18,  // em chamas (frames 203-206). O state SOBREVIVE ao voo:
+                         // com vy > 1.0 o engine troca 203/204 por 205/206
+                         // (lf2.exe 0x0040e893). A saida e' pelo cronometro de
+                         // queimadura, nao pelo pouso.
     ST_INJURED2   = 16,  // Dance of Pain (frames 226-229): the long stun, and the
                          // ONLY state an itr kind 1 (catch_injured) may grab
                          // (OpenLF2 const.c:102 injured_state_2 = 16).

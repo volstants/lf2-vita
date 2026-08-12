@@ -163,6 +163,7 @@ struct HitInfo {
     int injury = 20, fall = -1, dvx = 0, zwidth = 15;
     // `arest` e `vrest` NÃO são o mesmo temporizador e o engine os guarda em
     // lugares de naturezas diferentes. Ver applyRest() abaixo.
+    int bdefend = 0;       // itr+0x40 — acumula na vitima; > 30 quebra a guarda
     int arest = 0;         // itr+0x20 — cooldown ESCALAR do atacante
     int vrest = 0;         // itr+0x24 — cooldown POR PAR (atacante, vítima)
     int kind = 0;          // itr kind that produced this hit (see itrDeals)
@@ -247,6 +248,7 @@ static bool fighterAttack(const lf2::Fighter& f, HitInfo& out) {
             out.injury = it.injury > 0 ? it.injury : 20;
             out.fall   = it.fall;
             out.dvx    = it.dvx;
+            out.bdefend = it.bdefend;
             out.arest  = it.arest;
             out.vrest  = it.vrest;
             out.singleTarget = (it.vrest == 0);
@@ -980,7 +982,7 @@ int main(int argc, char* argv[]) {
                         p.f.hp = p.maxHp();
                         p.f.mp = p.f.maxMp;
                         p.knockedDown = false;
-                        p.fp = 0;
+                        p.fall = 0;
                         p.h = 0.f; p.vy = 0.f;
                         p.f.setFrame(lf2::fid::STANDING);
                         p.syncAnchor();
@@ -1000,7 +1002,7 @@ int main(int argc, char* argv[]) {
                         if (e.f.hp > 0 && es == lf2::ST_LYING) {
                             if (++auditDownTicks[i] > 20) {
                                 auditDownTicks[i] = 0;
-                                e.knockedDown = false; e.fp = 0;
+                                e.knockedDown = false; e.fall = 0;
                                 e.h = 0.f; e.vy = 0.f; e.f.vx = 0.f;
                                 e.f.setFrame(lf2::fid::STANDING);
                                 e.syncAnchor();
@@ -1227,7 +1229,8 @@ int main(int argc, char* argv[]) {
                         applyRest(hi, playerArest, e.rehitTimer);
                         e.hitFlash   = 10;
                         float kb = (float)(hi.dvx > 0 ? hi.dvx : 1);
-                        e.a.hit(hi.injury, player.right ? kb : -kb, hi.fall, hi.effect);
+                        e.a.hit(hi.injury, player.right ? kb : -kb, hi.fall, hi.effect,
+                                hi.bdefend, player.right);
 #ifdef LF2_HEADLESS
                         g_damageDealt += hi.injury;
 #endif
@@ -1254,6 +1257,7 @@ int main(int argc, char* argv[]) {
                             whi.injury = it.injury; whi.fall = it.fall;
                             whi.dvx = it.dvx;
                             whi.arest = it.arest; whi.vrest = it.vrest;
+                            whi.bdefend = it.bdefend;
                             whi.zwidth = it.zwidth > 0 ? it.zwidth : 15;
                             whi.kind   = it.kind;
                             // vrest == 0 is single-target here too. This path knew
@@ -1307,7 +1311,8 @@ int main(int argc, char* argv[]) {
                             applyRest(whi, playerArest, e.rehitTimer);
                             e.hitFlash   = 10;
                             float kb = (float)(whi.dvx > 0 ? whi.dvx : 4);
-                            e.a.hit(whi.injury, player.right ? kb : -kb, whi.fall, whi.effect);
+                            e.a.hit(whi.injury, player.right ? kb : -kb, whi.fall, whi.effect,
+                                    whi.bdefend, player.right);
 #ifdef LF2_HEADLESS
                             // The held-weapon swing counts toward the harness's
                             // damage figure too. It did not, which left the whole
@@ -1350,7 +1355,8 @@ int main(int argc, char* argv[]) {
                         {
                             e.hasHitPlayer = true;
                             float kb = (float)(ehi.dvx > 0 ? ehi.dvx : 1);
-                            player.hit(ehi.injury, e.a.right ? kb : -kb, ehi.fall, ehi.effect);
+                            player.hit(ehi.injury, e.a.right ? kb : -kb, ehi.fall, ehi.effect,
+                                       ehi.bdefend, e.a.right);
                         }
                     }
                 }
@@ -1394,7 +1400,8 @@ int main(int argc, char* argv[]) {
                                 fighterBody(e.a.f, ebody) && boxOverlap(ohi.box, ebody))
                             {
                                 float kb = (float)(ohi.dvx > 0 ? ohi.dvx : 4);
-                                e.a.hit(ohi.injury, o.f.facingRight ? kb : -kb, ohi.fall, ohi.effect);
+                                e.a.hit(ohi.injury, o.f.facingRight ? kb : -kb, ohi.fall, ohi.effect,
+                                        ohi.bdefend, o.f.facingRight);
 #ifdef LF2_HEADLESS
                                 g_damageDealt += ohi.injury;
 #endif
@@ -1417,7 +1424,8 @@ int main(int argc, char* argv[]) {
                                                  player.f.frameId, true) &&
                             fabsf(o.f.z - player.z) < (float)ohi.zwidth && boxOverlap(ohi.box, pBody)) {
                             float kb = (float)(ohi.dvx > 0 ? ohi.dvx : 4);
-                            player.hit(ohi.injury, o.f.facingRight ? kb : -kb, ohi.fall, ohi.effect);
+                            player.hit(ohi.injury, o.f.facingRight ? kb : -kb, ohi.fall, ohi.effect,
+                                       ohi.bdefend, o.f.facingRight);
                             applyRest(ohi, o.arest, o.victimRest[NUM_ENEMIES]);
                             o.onHit();
                         }

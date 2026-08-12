@@ -47,8 +47,9 @@ namespace fid {
     constexpr int BROKEN_DEF = 112;// 112-114
     constexpr int INJURED  = 220;  // 220-221 light stagger → standing (999)
     // Hit reaction is tiered by falling points (F.LF character.js:1676-1686):
-    // 220 (fp<=20) · 222 (21-30) · 224 (31-40) · 226 (41-60) = Dance of Pain,
-    // state 16, the long stun and the only grabbable state.
+    // 226 = Dance of Pain (state 16), o atordoamento longo e o unico estado
+    // que um itr kind 1 pode agarrar. A escolha entre 222 e 224 e' pelo FACING
+    // (lf2.exe 0x0042ebcb), nao por faixa de fall — ver Player::hit.
     constexpr int DANCE_OF_PAIN = 226;
     // Hit-effect victim reactions (itr `effect`), canonical in every character:
     //   200 → 201 (state 13, wait 90 = 3 s frozen) → 202 → 182 falling
@@ -81,8 +82,18 @@ struct Player {
     // LF2 Falling Points: start 0, a hit ADDS the itr's `fall`, decays 1/frame.
     // FP > 40 → Dance of Pain (stunned in place); FP > 60 → knocked down, FP=0.
     // (Community-documented; z-band/anti-juggle cross-checked in OpenLF2.)
-    static constexpr int FP_DOP = 40, FP_FALL = 60;   // DoP / KO thresholds
-    int   fp = 0, fpAcc = 0;
+    // ── Falling points (objeto+0xB0) e bdefend (objeto+0xB8) ─────────────
+    // SOURCE: lf2.exe. Ambos são contadores INTEIROS na vítima, ambos decaem
+    // 1 por tick enquanto > 0 (0x0040da15 e 0x0040da28, com `xor %edi,%edi`
+    // em 0x0040d964 fixando o comparando em zero).
+    //
+    // O `fall` NÃO é um acumulador livre: ao escolher a reação o engine
+    // REESCREVE o contador para o piso da faixa (0x0042eb6c, 0x0042ebdc,
+    // 0x0042ec29). E 80 (0x50) não é um teto, é o marcador de "vai tombar",
+    // testado depois por igualdade.
+    static constexpr int FALL_DOWN = 80;   // 0x50 — marcador de tombo
+    int   fall = 0;        // objeto+0xB0
+    int   bdefend = 0;     // objeto+0xB8
 
     // Input edge / double-tap-to-run tracking.
     bool  prevL = false, prevR = false, prevU = false, prevDn = false, prevDef = false,
@@ -253,9 +264,15 @@ struct Player {
         bool newU = U && !prevU, newDn = D && !prevDn, newSpc = spc && !prevSpc;
         prevL = L; prevR = R; prevU = U; prevDn = D;
         if (tapTimer > 0) --tapTimer;
-        // F.LF global.js: recover.fall = -0.45 per TU (not 1). Accumulated in
-        // hundredths so the engine stays integer-only.
-        if (fp > 0) { fpAcc += 45; while (fpAcc >= 100 && fp > 0) { fpAcc -= 100; --fp; } }
+        // Decaimento de fall e bdefend: 1 por tick enquanto > 0.
+        // SOURCE: lf2.exe 0x0040da15-0x0040da3a, no update por tick do objeto:
+        //     40da15: mov 0xb0(%esi),%eax ; cmp %edi,%eax ; jle
+        //     40da1f: add $0xffffffff,%eax ; mov %eax,0xb0(%esi)
+        //     40da28: (idem para 0xb8)
+        // `%edi` é zero (`xor %edi,%edi` em 0x0040d964). O 0.45/TU que estava
+        // aqui vinha do F.LF e não tem contrapartida no binário.
+        if (fall    > 0) --fall;
+        if (bdefend > 0) --bdefend;
         if ((++mpRegenAcc & 1) == 0 && f.mp < f.maxMp) ++f.mp;   // ~15 MP/s regen
         if (f.removed) { f.removed = false; f.setFrame(fid::STANDING); }   // 1000-code safety
         if (f.vanishReq) { f.vanishReq = false; vanish = VANISH_TICKS; }    // next: 1280
@@ -575,7 +592,28 @@ struct Player {
             f.setFrame(knockedDown ? fid::LYING : fid::STANDING);
             return;
         }
-        if (knockedDown) return;                // a knockdown holds its falling frame
+        if (knockedDown) {
+            // O frame de queda NÃO é fixo: o engine escolhe entre 180-183 pela
+            // velocidade vertical, a cada tick.
+            // SOURCE: lf2.exe FUN_0040e490, bloco em 0x0040e242-0x0040e2aa, com
+            // as constantes lidas do pool de doubles:
+            //     0x448340 = -8.0   0x447980 = 8.0
+            //   frames[frame_id].state == 12 (caindo) && frame_id < 185:
+            //     vy <  -8.0            → 180
+            //     -8.0 <= vy <  1.0     → 181
+            //      1.0 <= vy <  8.0     → 182
+            //      8.0 <= vy            → 183
+            // O porte segurava 180 durante a queda inteira, então o tombo não
+            // tinha progressão de pose nenhuma.
+            if (f.state() == ST_FALLING && f.frameId < 185) {
+                int nf = (vy < -8.f) ? fid::FALLING
+                       : (vy <  1.f) ? fid::FALLING + 1
+                       : (vy <  8.f) ? fid::FALLING + 2
+                                     : fid::FALLING + 3;
+                if (f.frameId != nf) f.setFrame(nf);
+            }
+            return;
+        }
 
         int s = f.state();
         // Already mid air-attack (jump_attack = state 3, dash_attack = state 15)
@@ -702,108 +740,140 @@ struct Player {
                (f.frameId >= fid::ICE && f.frameId <= fid::ICE + 2);
     }
 
-    int hit(int dmg, float kbx, int itrFall, int effect = 0) {
-        // Vanished (next: 1280) = F.LF's effect.super: the bdy is skipped
-        // entirely, so nothing can touch you until you reappear.
+    // Aplica um acerto. `kbx` é o knockback horizontal já assinado pelo facing
+    // do atacante; `itrFall` é `itr->fall` (+0x1C) e `itrBdefend` é
+    // `itr->bdefend` (+0x40), ambos crus do .dat. Devolve o HP realmente perdido.
+    int hit(int dmg, float kbx, int itrFall, int effect = 0,
+            int itrBdefend = 0, bool attackerFacingRight = true) {
+        // Vanished (next: 1280) = F.LF's effect.super: a bdy é ignorada, nada
+        // toca no ator até ele reaparecer.
         if (untouchable()) return 0;
-        // The itr `effect` veto (lf2.exe FUN_00417400 — see itrEffectAllows).
-        // The caller applies the full rule, attacker state included; this is the
-        // victim-only half, repeated here so NO path can burn a burning body.
-        // It must run BEFORE the damage: the original rejects the pair outright,
-        // it does not "hit for damage but skip the reaction" — which is what the
-        // old guard down in the fire branch did, and why a victim standing in
-        // Firen's ground fire kept bleeding HP while frozen in frame 203.
+        // Veto por `itr->effect` (lf2.exe FUN_00417400 — ver itrEffectAllows).
+        // Roda ANTES do dano: o original rejeita o par inteiro, não "bate e
+        // pula a reação".
         if (!itrEffectAllows(effect, /*attackerState=*/-1, f.state(), f.frameId,
                              /*victimIsCharacter=*/true))
             return 0;
-        if (itrFall < 0) itrFall = 20;                // default fall for unset itr
-        bool heavyBlow    = itrFall >= 60;            // guard-breaking / instant fall
-        bool blockedFront = isDefending() &&
-                            ((kbx < 0.f) == right);   // struck from the facing side
-        if (blockedFront && !heavyBlow) {             // fully guarded — no damage
-            f.setFrame(fid::DEFEND + 1);              // guard-recoil shake (frame 111)
-            x += kbx * 0.15f; clampPos();
-            return 0;
-        }
 
+        // Defender NÃO zera o dano: custa um décimo.
+        // SOURCE: lf2.exe 0x0042ff52-0x0042ff6a, no ramo que desemboca no bloco
+        // de bdefend:
+        //     42ff52: mov  $0x66666667,%eax
+        //     42ff57: imul %ecx                 ; ecx = injury
+        //     42ff60: sar  $0x2,%edx
+        //     42ff65: shr  $0x1f,%ecx
+        //     42ff68: add  %edx,%ecx            ; == injury / 10
+        //     42ff6a: sub  %ecx,0x2fc(%eax)     ; vitima->hp -= injury/10
+        // O porte devolvia 0 para golpe leve bloqueado e `dmg/2` para pesado —
+        // as duas metades eram invenção.
+        bool blockedFront = isDefending() && ((kbx < 0.f) == right);
+        int  applied = blockedFront ? dmg / 10 : dmg;
         int before = f.hp;
-        int taken  = blockedFront ? dmg / 2 : dmg;    // chip through a broken guard
-        f.hp = clampI(f.hp - taken, 0, f.maxHp);
+        f.hp = clampI(f.hp - applied, 0, f.maxHp);
         int lost = before - f.hp;
 
-        if (blockedFront && heavyBlow) { f.setFrame(fid::BROKEN_DEF); return lost; }
+        // ── Defesa: bdefend ACUMULA na vítima ────────────────────────────────
+        // SOURCE: lf2.exe 0x0043008b-0x004300f4
+        //     43008b: mov 0x40(%ecx),%edx      ; itr->bdefend
+        //     43008e: add %edx,0xb8(%eax)      ; vitima->bdefend += itr->bdefend
+        //     4300d2: cmpl $0x1e,0xb8(%eax)    ; > 30 ?
+        //     4300d9: jle 0x4300ee
+        //     4300df: cmpl $0x7,0x8(%edx)      ; e está em state 7 (defendendo)
+        //     4300e5: movl $0x70,0x70(%eax)    ; → frame 112 (broken_defend)
+        //     4300ee: cmpl $0x6e,0x70(%eax)    ; senão, se frame == 110
+        //     4300f4: movl $0x6f,0x70(%eax)    ; → frame 111 (recuo de guarda)
+        // O porte decidia quebra de guarda por `itr->fall >= 60`, que era
+        // invenção: o campo `bdefend` existia no parser e nunca era lido.
+        bdefend += itrBdefend;
+        if (blockedFront) {
+            if (bdefend > 30) { f.setFrame(fid::BROKEN_DEF); return lost; }
+            f.setFrame(fid::DEFEND + 1);          // 111, recuo de guarda
+            x += kbx * 0.15f; clampPos();
+            return lost;
+        }
 
-        // ── itr `effect`: fire and ice override the normal reaction ───────────
-        // 450 itrs in the data carry a non-zero effect, and it was ignored
-        // entirely — Firen's fire and Freeze's ice landed as plain damage.
+        // ── effect: fogo e gelo substituem a reação normal ───────────────────
         if (effectIsIce(effect)) {
             if (effectDropsWeapon(effect)) dropWeaponReq = true;
             if (!iced()) {
-                fp = 0; burn = 0; knockedDown = false;
+                fall = 0; burn = 0; knockedDown = false;
                 f.vx = 0.f; h = 0.f; vy = 0.f;
-                f.setFrame(fid::ICE);           // 200 → 201 (3 s) → 202 → falling
+                f.setFrame(fid::ICE);
             }
             return lost;
         }
         if (effectIsFire(effect)) {
             if (effectDropsWeapon(effect)) dropWeaponReq = true;
-            fp = 0;
+            fall = 0;
             f.vx = 0.f;
-            f.setFrame(fid::BURNING);           // 203, locked for BURN_TICKS
+            f.setFrame(fid::BURNING);
             burn = BURN_TICKS;
             return lost;
         }
 
-        // Falling Points: each hit adds its `fall`. Over 60 (or death) → knocked
-        // down; otherwise stay up and keep taking hits (a flurry accumulates FP
-        // until it crosses 60). `kbx` carries the itr's own dvx (facing-signed):
-        // flurry hits (dvx 2) barely nudge — keeping the victim in the combo —
-        // while a launcher (dvx 12/fall 70) crosses 60 at once and throws.
-        fp += itrFall;
-        // F.LF fall(): besides the FP threshold, a hit ALWAYS fells you when you
-        // are frozen (state 13) or already off the ground — that is what makes
-        // ice shatter and what gives the game its anti-air.
-        //   character.js:1665  if ($.state() == 13) { falldown() }
-        //   character.js:1668  else if ($.ps.y < 0 || $.ps.vy < 0) { falldown() }
-        bool frozen   = iced();
-        bool airborne = !grounded();          // grounded() now folds in vy < 0
-        if (fp > FP_FALL || f.hp <= 0 || frozen || airborne) {   // knockdown / juggle
-            fp = 0;
-            bool juggle = knockedDown;                // already airborne = re-hit
+        // ── Falling points ───────────────────────────────────────────────────
+        // SOURCE: lf2.exe 0x0042ea8c-0x0042ec33. Fluxo reconstruído:
+        //     42ea8c: mov 0x1c(%ecx),%ecx      ; itr->fall
+        //     42ea8f: test %ecx,%ecx ; jne
+        //     42ea9a: addl $0x14,0xb0(%eax)    ; fall == 0 → soma 20 (default)
+        //     42eaa3: add %ecx,0xb0(%eax)      ; senão soma itr->fall
+        // O default dispara em `itr->fall == 0`, não em "não informado".
+        fall += (itrFall == 0 ? 20 : itrFall);
+
+        // Tombo forçado (0x0042eabf-0x0042eb02): vítima congelada (state 13 via
+        // frame_id3), já caindo (state 12 via frame_id4), ou não-personagem
+        // (file->type 1/2/4/6 = armas e bebida). Aqui a vítima é sempre
+        // personagem, então restam os dois estados.
+        if (iced() || f.state() == ST_FALLING) fall = FALL_DOWN;
+        // hp <= 0 força tombo (0x0043005f-0x00430069).
+        if (f.hp <= 0) fall = FALL_DOWN;
+
+        // Faixas, com REESCRITA do contador para o piso de cada uma.
+        //     42eb20: cmp $0x3c,%ecx ; jle   → > 60 : tomba (fall = 80)
+        //     42eb43: cmp $0x28,%ecx ; jle   → > 40 : frame 226, fall = 60
+        //     42eb98: cmp $0x14,%ecx ; jle   → > 20 : frame 222/224, fall = 40
+        //     42ec01: test %ecx,%ecx ; jle   → >  0 : frame 220, fall = 20
+        bool falls = false;
+        if (fall > 60) {
+            fall = FALL_DOWN; falls = true;
+        } else if (fall > 40) {
+            f.setFrame(fid::DANCE_OF_PAIN);            // 226
+            fall = 60;
+        } else if (fall > 20) {
+            // A escolha 222 vs 224 é pelo FACING, não pela faixa:
+            //     42ebac: mov 0x80(%eax),%dl        ; facing da vitima
+            //     42ebbb: cmp 0x80(%ecx),%dl        ; == facing do atacante ?
+            //     42ebc8: sete %al
+            //     42ebcb: lea 0xde(%eax,%eax,1),%eax ; 222 + 2*al
+            // Facings iguais (golpe pelas costas) → 224; diferentes → 222.
+            // O porte escolhia por faixa de fp, o que veio do F.LF.
+            f.setFrame(right == attackerFacingRight ? fid::INJURED + 4
+                                                    : fid::INJURED + 2);
+            fall = 40;
+        } else if (fall > 0) {
+            f.setFrame(fid::INJURED);                  // 220
+            fall = 20;
+        }
+
+        // Estar NO AR força o tombo, qualquer que tenha sido a faixa.
+        //     42eb7d / 42ebed / 42ec3a: cmpl $0x0,0x14(%edx) ; jge (segue)
+        // `+0x14` é a coordenada y do objeto; y < 0 = fora do chão.
+        if (!falls && !grounded()) { fall = FALL_DOWN; falls = true; }
+
+        if (falls) {
+            bool juggle = knockedDown;
             knockedDown = true;
             f.setFrame(fid::FALLING);
-            // The knockback is the engine's, not the frame's: discard the tumble
-            // frame's own dvy so it cannot stack on top of the launch.
-            if (juggle) { vy = -6.f; discardFrameDvy(); }   // re-loft, keep height
+            if (juggle) { vy = -6.f; discardFrameDvy(); }
             else        { launch(-8.f); }
-            // EVERY knockdown carries the itr's horizontal knockback, including a
-            // re-hit on a victim already in the air.
-            // SOURCE: lf2.exe 0x0042ee00-0x0042ef00 (lf2_decomp.c 81100-81190):
-            // the knockback block does `injured->vx +/- itr->dvx` (the itr is
-            // `local_74`, dvx is `local_74[5]` at +0x14), signed by the attacker's
-            // facing, with no juggle special case anywhere in the chain.
-            // We used to zero it for juggles ("keep the victim in place"), an
-            // invention with no source: a second hit landing on a falling body
-            // just bumped it, so Henry's charged arrow looked like it knocked the
-            // target down on one shot and not on the next.
+            // O knockback horizontal do itr entra em TODO acerto, inclusive
+            // re-acerto no ar (lf2.exe 0x0042ee5b: `injured->vx +/- itr->dvx`,
+            // sem nenhum ramo que consulte o estado aéreo da vítima).
             float lv = std::fabs(kbx);
             if (!juggle && lv < 6.f) lv = 6.f;
             f.vx = (kbx < 0.f ? -lv : lv);
         } else {
-            // The reaction frame is picked by the ACCUMULATED falling points, in
-            // four tiers — not one generic flinch (F.LF character.js:1676-1686):
-            //     fp <= 20 → 220     fp 21..30 → 222
-            //     fp 31..40 → 224    fp 41..60 → 226  (Dance of Pain, state 16)
-            // 226 is the long stun (wait 6 vs 2) and it is also the only state an
-            // itr kind 1 can grab (OpenLF2: catch_injured requires injured_state_2
-            // == 16), so getting the tier right is what will make catches work.
-            int react = fid::INJURED;                 // 220
-            if      (fp > FP_DOP) react = fid::DANCE_OF_PAIN;   // 226
-            else if (fp > 30)     react = fid::INJURED + 4;     // 224
-            else if (fp > 20)     react = fid::INJURED + 2;     // 222
-            if (!f.data || !f.data->frame(react)) react = fid::INJURED;
-            f.setFrame(react);
-            x += kbx; clampPos();                     // dvx-sized nudge (a few px)
+            x += kbx; clampPos();                      // empurrão do tamanho do dvx
         }
         return lost;
     }

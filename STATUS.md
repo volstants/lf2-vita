@@ -1,3 +1,30 @@
+# LF2 Vita — Estado da sessao (2026-08-12)
+
+## Sessao 2026-08-12 — nucleo de reacao a dano, do assembly
+
+Auditoria dedicada aos tres campos que o porte nunca leu: `fall` (objeto+0xB0),
+`bdefend` (+0xB8) e `shaking` (+0xB4). O modelo em uso vinha do F.LF e de
+invencao propria; quatro divergencias confirmadas no assembly e corrigidas, uma
+registrada como nao comprovada. Detalhe completo em `AUDITORIA_2026-08-12.md`.
+
+- **A8** `fall` satura no piso da faixa a cada reacao (60/40/20), e o default de
+  20 dispara em `itr->fall == 0`. Nao e' acumulador livre — e' isso que faz o
+  segundo golpe fraco derrubar. `0x0042ea8c`-`0x0042ec33`.
+- **A9** Frames 222 vs 224 sao escolhidos pelo **facing** (`lea 0xde(%eax,%eax,1)`
+  sobre `facing_vitima == facing_atacante`), nao por faixa de intensidade.
+  `0x0042ebcb`.
+- **A10** `bdefend` acumula na vitima e quebra a guarda **acima de 30**; um golpe
+  defendido custa **`injury/10`**, nao zero. `0x0043008e`, `0x0042ff6a`.
+- **A11** `fall` e `bdefend` decaem **1 por tick**, nao 0.45. `0x0040da15`.
+- **A12** `shaking` (hitstop): atacante +3, vitima -5. Gravado e decai, mas o
+  consumidor nao foi isolado — **nao implementado**, registrado com endereco.
+
+Armadilha registrada: `git filter-repo` **remove os arquivos rastreados da
+arvore de trabalho**, nao so' do historico. Custou o `assets/` desta maquina,
+recuperado do backup. Fazer o backup do passo 0 antes, sempre.
+
+---
+
 # LF2 Vita — Estado da sessão (2026-07-30)
 
 ## Sessão 2026-07-30 — gate de `effect` do itr, fogo no ar, bolas perfurantes

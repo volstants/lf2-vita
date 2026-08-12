@@ -1,3 +1,33 @@
+# Roteiro adicional — entrega 2026-08-12 (nucleo de reacao a dano)
+
+Cobre `AUDITORIA_2026-08-12.md`. Esta entrega mexe no que o jogo tem de mais
+sensivel ao tato: quantos golpes derrubam, o que a defesa aguenta e qual
+animacao de dano toca. Espere que a sensacao mude — a questao e' se mudou PARA
+o original.
+
+| # | Teste | Esperado |
+|---|---|---|
+| 29 | Dois socos fracos seguidos (fall 25) | **derruba no segundo**, nao no terceiro **[N]** |
+| 30 | Socos espacados (1 s entre eles) | nao derruba: o contador decai 1/tick **[N]** |
+| 31 | Golpe medio isolado (fall 45) | Dance of Pain, atordoamento longo **[N]** |
+| 32 | Golpe de frente (fall 25) | animacao de dano **frontal** (222) **[N]** |
+| 33 | Mesmo golpe **pelas costas** | animacao **de costas** (224) — antes vinha por intensidade **[N]** |
+| 34 | Defender um soco fraco | perde ~1/10 do dano; antes era zero **[!]** |
+| 35 | Defender golpes ate a guarda ceder | quebra por `bdefend` acumulado > 30, nao por um golpe pesado unico **[N]** |
+| 36 | Defender, esperar, defender de novo | a guarda "recupera": bdefend decai 1/tick **[N]** |
+| 37 | Acertar alguem no ar | derruba sempre, qualquer que seja o fall **[R]** |
+| 38 | Acertar alguem congelado | estilhaça e tomba **[R]** |
+| 39 | Partida completa contra 3 inimigos | dificuldade mudou, mas ninguem fica imortal nem preso **[!]** |
+
+**Risco assumido:** o item 34 muda comportamento visivel — defender deixou de
+ser gratuito. E o 29 torna combos mais letais. Os dois vem do assembly
+(`0x0042ff6a` e `0x0042eb6c`), mas nunca rodaram no device.
+
+**Nao implementado:** hitstop (`shaking`, achado A12). Se os golpes parecerem
+"sem peso" comparados ao original, e' esse o motivo, e nao um bug desta entrega.
+
+---
+
 # Roteiro de teste no device — entrega 2026-07-30 (auditoria de assembly)
 
 Cobre os seis achados da `AUDITORIA_2026-07-30.md`. Nada validado em hardware:

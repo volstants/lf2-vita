@@ -206,7 +206,7 @@ int main() {
     // ── Combat reactions ─────────────────────────────────────────────────────
     auto reset = [&]() {
         p.f.hp = p.f.maxHp; p.h = 0.f; p.vy = 0.f; p.knockedDown = false;
-        p.fp = 0;
+        p.fall = 0;
         p.right = true; p.f.setFrame(lf2::fid::STANDING, false);
     };
 
@@ -221,10 +221,13 @@ int main() {
         p.tick(false,false,false,false,false,false);
     CHECK(p.state() == lf2::ST_STANDING,  "stagger recovers to standing");
 
-    // A rapid sequence of weak hits accumulates FP (25,50,75) past 60 → knockdown.
+    // Falling points: o contador e' REESCRITO para o piso da faixa a cada
+    // reacao (lf2.exe 0x0042eb6c/0x0042ebdc/0x0042ec29), entao dois golpes de
+    // fall 25 ja derrubam: 25 -> faixa >20 -> fall := 40; 40+25 = 65 > 60.
     reset();
-    p.hit(20, -10.f, 25); CHECK(!p.knockedDown, "combo hit 1 (FP 25): still standing");
-    p.hit(20, -10.f, 25); CHECK(!p.knockedDown, "combo hit 2 (FP 50): still standing");
+    p.hit(20, -10.f, 25); CHECK(!p.knockedDown, "1o golpe (fall 25): em pe");
+    CHECK(p.fall == 40, "…e o contador satura no piso da faixa (40, nao 25)");
+    p.hit(20, -10.f, 25); CHECK(p.knockedDown, "2o golpe (40+25=65 > 60): derruba");
     p.hit(20, -10.f, 25); CHECK(p.knockedDown,  "combo hit 3 (FP 75 > 60): knockdown");
 
     // A single fall-60 hit is FP 60 — NOT over 60 — so it staggers, doesn't fall.
@@ -250,14 +253,45 @@ int main() {
         p.tick(false,false,false,false,false,false);
     CHECK(p.state() != lf2::ST_LYING && !p.knockedDown, "alive actor gets up from lying");
 
-    // Front defend blocks a light hit entirely.
+    // Defesa: custa injury/10 (lf2.exe 0x0042ff52-0x0042ff6a), nao zero.
     reset();
     p.defend();
     CHECK(p.isDefending(),                "defend enters guard (state 7)");
     int hpBefore = p.hp();
-    int blocked = p.hit(20, -30.f, /*fall=*/25);       // struck from the front
-    CHECK(blocked == 0 && p.hp() == hpBefore, "front defend fully blocks a light hit");
-    CHECK(p.f.frameId == lf2::fid::DEFEND + 1, "blocking shows the guard-recoil frame (111)");
+    int blocked = p.hit(20, -30.f, /*fall=*/25, /*effect=*/0, /*bdefend=*/10);
+    CHECK(blocked == 2 && p.hp() == hpBefore - 2,
+          "guarda frontal custa injury/10, nao zera o dano");
+    CHECK(p.f.frameId == lf2::fid::DEFEND + 1, "…e vai ao recuo de guarda (111)");
+    CHECK(p.bdefend == 10, "bdefend acumula o valor do itr");
+
+    // bdefend > 30 quebra a guarda (lf2.exe 0x004300d2 -> frame 112).
+    reset();
+    p.defend();
+    p.hit(20, -30.f, 25, 0, /*bdefend=*/16);
+    CHECK(p.f.frameId == lf2::fid::DEFEND + 1, "bdefend 16: guarda aguenta");
+    p.defend();
+    p.hit(20, -30.f, 25, 0, /*bdefend=*/16);
+    CHECK(p.bdefend > 30 && p.f.frameId == lf2::fid::BROKEN_DEF,
+          "bdefend acumulado 32 > 30: guarda QUEBRA (frame 112)");
+
+    // 222 vs 224 e' pelo FACING (lf2.exe 0x0042ebcb: 222 + 2*(facings iguais)).
+    reset();
+    p.right = true;
+    p.hit(20, -10.f, 25, 0, 0, /*attackerFacingRight=*/false);
+    CHECK(p.f.frameId == lf2::fid::INJURED + 2,
+          "facings opostos (golpe de frente) -> frame 222");
+    reset();
+    p.right = true;
+    p.hit(20, 10.f, 25, 0, 0, /*attackerFacingRight=*/true);
+    CHECK(p.f.frameId == lf2::fid::INJURED + 4,
+          "facings iguais (golpe pelas costas) -> frame 224");
+
+    // Decaimento: 1 por tick (lf2.exe 0x0040da15), nao 0.45.
+    reset();
+    p.hit(20, -10.f, 25);                 // fall := 40
+    int f0 = p.fall;
+    p.tick(false,false,false,false,false,false);
+    CHECK(p.fall == f0 - 1, "fall decai exatamente 1 por tick");
 
     // Fatal knockdown → dead, pinned lying.
     reset();
@@ -577,6 +611,24 @@ int main() {
         // vrest <= 0 nunca toca no contador do par.
         a = 0; v = 7; lf2::applyRest(6, 0, a, v);
         CHECK(v == 7, "vrest 0 nao zera o contador do par que ja existia");
+    }
+
+    // Frames de queda 180-183 escolhidos por vy (lf2.exe 0x0040e242, constantes
+    // -8.0 e 8.0 do pool de doubles).
+    {   lf2::Player v; v.load(&dennis); v.x=400.f; v.z=400.f; v.syncAnchor();
+        v.hit(50, 20.f, 70);                    // derruba
+        CHECK(v.knockedDown, "hit pesado derruba");
+        bool viu181=false, viu182=false, viu183=false;
+        for (int t = 0; t < 60 && !v.grounded(); ++t) {
+            v.tick(false,false,false,false,false,false);
+            if (v.f.frameId == lf2::fid::FALLING + 1) viu181 = true;
+            if (v.f.frameId == lf2::fid::FALLING + 2) viu182 = true;
+            if (v.f.frameId == lf2::fid::FALLING + 3) viu183 = true;
+        }
+        CHECK(viu181, "queda passa pelo frame 181 (subida/topo, vy em [-8,1))");
+        CHECK(viu182, "…e pelo 182 (descida, vy em [1,8))");
+        CHECK(viu181 && (viu182 || viu183),
+              "…ou seja, a pose PROGRIDE em vez de travar no 180");
     }
 
     if (g_fail) { std::printf("\n%d CHECK(S) FAILED\n", g_fail); return 1; }
