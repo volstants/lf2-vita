@@ -391,20 +391,28 @@ realmente decolam, a cadeia do golpe é truncada no pouso — é a causa direta 
 quedas de dennis/woody/firen na tabela acima. Corrigir isso é a próxima tarefa
 de fidelidade, e deve devolver boa parte desse dano.
 
-## 9. Próximos passos
+## 9. Próximos passos — MOVIDO
 
-1. **Usuário: buildar e testar as armas** (nunca testadas no device) + o **novo
-   cenário data-driven** (parallax, tufos de grama espaçados por `loop` sobre o
-   fill verde — deve bater com o LF2 original) e commitar.
-2. ✅ **bg.dat data-driven** (feito). Falta `stage.dat` (waves, spawns, bosses) e
-   tornar `MAP_W`/`Z_MIN`/`Z_MAX` runtime para habilitar as outras 8 fases.
-3. **Agarrão** (cpoint) e catch/throw.
-4. ✅ **Códigos `next` especiais** (feito: 1280 disappear + next negativo).
-   Resta a **transformação** (Louis→LouisEX, Rudolf copiando o oponente), que é
-   trocar o `.dat` do lutador em runtime.
-5. Polish: DoP frame 226, hitstop 3, `vrest` por atacante, `bdefend` acumulado.
-6. Davis Leap Attack (4-input) e combos raros.
-7. (Fora deste repo) Remaster como projeto separado.
+> Esta seção mantinha uma segunda lista de prioridades que **contradizia** a
+> atual. O item 5 ("Polish: DoP frame 226, hitstop 3, `vrest` por atacante,
+> `bdefend` acumulado") descreve como pendente três coisas já implementadas em
+> 2026-08-12 pelos achados A8-A11. Duas listas de prioridade é como se erra:
+> alguém lê a errada.
+>
+> **A lista viva está em `RELATORIO_2026-08-12.md` §4** (aberto, por prioridade)
+> e em `AUDITORIA_SUPERFICIE.md` (ordem sugerida, com custo e justificativa).
+>
+> O que continua pendente e nasceu aqui, sem duplicar a outra lista:
+>
+> - `stage.dat` (waves, spawns, bosses); `MAP_W`/`Z_MIN`/`Z_MAX` em runtime para
+>   habilitar as outras 8 fases.
+> - Agarrão (`cpoint`) e catch/throw.
+> - Transformação (Louis→LouisEX, Rudolf copiando o oponente) — trocar o `.dat`
+>   do lutador em runtime.
+> - Davis Leap Attack (4 inputs) e combos raros.
+> - Áudio.
+>
+> Estes estão em `CHECKLIST.md`, que é o roadmap de features.
 
 ## 10. Como trabalhar
 

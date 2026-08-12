@@ -298,7 +298,12 @@ Armadilhas descobertas (não redescobrir):
 | 7 | Sombras | OK em device (elipse 37×9 do bg.dat) |
 | 8 | Cenário Lion Forest | Restaurado + FILE entries no VPK — aguarda reteste |
 
-## Próximos passos (ordem)
+## Próximos passos (ordem) — ⚠ LISTA MORTA, de 2026-07-23
+
+> Quase tudo aqui já foi feito (objetos/projéteis, MP, `bg.dat`, roster de 8).
+> **Não use esta lista.** A viva está em `RELATORIO_2026-08-12.md` §4 e em
+> `AUDITORIA_SUPERFICIE.md`; features restantes, em `CHECKLIST.md`. Mantida como
+> registro do que se planejava na época.
 
 1. Usuário: rebuild + reteste dos itens 1-5 acima; commit do lote
    ("Especiais no Quadrado, re-hit vrest/arest, knockback dvx, chao/land fix").

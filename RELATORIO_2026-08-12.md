@@ -269,6 +269,19 @@ Leitura obrigatória antes de qualquer coisa, nesta ordem:
 
 (AUDITORIA_2026-07-30.md tem A1-A7; leia se o assunto encostar neles.)
 
+PRECEDÊNCIA — os 11 .md do repo NÃO concordam entre si, e isso é conhecido.
+Quando dois discordarem, vale nesta ordem:
+  1. AUDITORIA_*.md            achado com endereço no binário — SEMPRE vence
+  2. AUDITORIA_SUPERFICIE.md   diz o que ainda NÃO tem evidência
+  3. RELATORIO_2026-08-12.md   índice e ponto de retomada
+  4. HANDOFF / STATUS /        contexto, histórico e roadmap.
+     CHECKLIST / TESTPLAN      NUNCA fonte de parâmetro de mecânica.
+
+Os arquivos de nível 4 têm banner no topo dizendo isso. Se você encontrar um
+número neles sem endereço do binário, ele é suspeito por padrão — três
+contradições reais já foram achadas e corrigidas em 2026-08-12, incluindo cinco
+parâmetros refutados que estavam em HANDOFF.md sob o título "VALIDADOS".
+
 Ferramentas nossas, use antes de sair desassemblando à mão:
   tools/struct_harvest.py     inventário de campos por deslocamento num intervalo
                               do .text. Saída é Nível D: o script não sabe para

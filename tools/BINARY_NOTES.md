@@ -1,3 +1,8 @@
+> Receitas de leitura direta do binário — a camada de **Nível A** do projeto.
+> Achados de fidelidade vão para `AUDITORIA_*.md`; o que ainda não tem
+> evidência, para `AUDITORIA_SUPERFICIE.md`. Ponto de entrada do projeto:
+> `RELATORIO_2026-08-12.md`.
+
 # Lendo o `lf2.exe` direto — receitas validadas (2026-07-29)
 
 > Registro para instâncias novas. As três fontes têm **pontos cegos diferentes**;

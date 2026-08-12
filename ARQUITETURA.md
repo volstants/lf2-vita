@@ -1,3 +1,7 @@
+> Avaliação de estrutura e modelagem. **Não é fonte de parâmetro de mecânica** —
+> para isso, `AUDITORIA_*.md` (com endereço) e `AUDITORIA_SUPERFICIE.md` (o que
+> ainda não tem). Ponto de entrada: `RELATORIO_2026-08-12.md`.
+
 # Avaliação arquitetural · 2026-08-12
 
 Pergunta: o porte está sendo feito da maneira certa, arquiteturalmente?
@@ -54,11 +58,20 @@ As divergências concretas, todas descobertas *depois* de causarem erro:
 | `frame_id1`/`3`/`4` | `frameId` único | ainda não sabemos quando o original os deixa divergir |
 | `vrest_of_objects[400]` na vítima | `victimRest[]` no atacante | equivalente hoje, divergente se surgir 3º ator |
 | — | `knockedDown` | estado paralelo sem contrapartida; causou bug real |
+| tabela de 3000 bytes + 2 cursores (`0x44FF90`) | **não existe** | 264 pontos de decisão aleatória do engine sem contrapartida (A13) |
 
 O padrão é sempre o mesmo: **inventamos uma representação, depois descobrimos a
 do original, depois convertemos.** Cada conversão é uma chance de errar, e a
 taxa-base registrada em `AUDITORIA_SUPERFICIE.md` é de nove erros em nove
 verificações.
+
+**A última linha da tabela é a mais barata de acertar, porque ainda não erramos
+nela.** O porte não tem fonte de aleatoriedade nenhuma — não há representação
+inventada para converter depois. Se `engine_random` entrar com a forma do
+original (tabela + dois cursores, `AUDITORIA_2026-08-12.md#a13`) **antes** de
+qualquer comportamento ramificado, este é o primeiro campo que nasce espelhado
+em vez de convertido. É a convergência incremental funcionando de forma
+preventiva, e não corretiva.
 
 Se o modelo tivesse espelhado `object_t` desde o início, as perguntas teriam sido
 "o que escreve este campo?" — que é respondível com `grep` no disassembly — em

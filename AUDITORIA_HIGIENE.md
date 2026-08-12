@@ -1,3 +1,10 @@
+> Auditoria de **higiene de código**, eixo independente da fidelidade. **Não é
+> fonte de parâmetro de mecânica** — para isso, `AUDITORIA_*.md` de fidelidade e
+> `AUDITORIA_SUPERFICIE.md`. Ponto de entrada: `RELATORIO_2026-08-12.md`.
+>
+> Estado em 2026-08-12: itens 4 e 5 corrigidos; **1, 2, 3 e 7 seguem abertos** —
+> fazer **depois** do teste no device, não junto.
+
 # Auditoria de higiene — perfil "AI slop" · 2026-07-30
 
 Mapeamento do repositório contra o perfil de código gerado sem verificação.

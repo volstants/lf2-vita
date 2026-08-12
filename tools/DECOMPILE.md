@@ -1,7 +1,26 @@
 # Decompilar o LF2 original (Ghidra headless)
 
-Objetivo: ter o C decompilado do `lf2.exe` para consultar a mecânica **na fonte**,
-em vez de inferir dos `.dat` ou confiar em reimplementações (F.LF / OpenLF2).
+> ## ⚠ O que sai daqui é ÍNDICE, não fonte
+>
+> A frase original deste arquivo dizia que o objetivo era consultar a mecânica
+> **"na fonte"**. Isso está errado e foi corrigido em 2026-08-12.
+>
+> O `lf2_decomp.c` é **Nível B**. Serve para localizar a região e formar
+> hipótese; a afirmação sai do **assembly** (`objdump`, Nível A). Dois motivos
+> medidos, não opinião:
+>
+> - **187 dos 481 `FUN_` do arquivo gerado não são entrada de função** — são
+>   stubs `int3`, padding de hot-patch do MSVC, ou endereços saltados por um
+>   `jmp` anterior. Rode `tools/fn_boundary_check.py` antes de citar qualquer
+>   pseudocódigo.
+> - O melhor decompilador assistido publicado hoje atinge **64,9%** de
+>   re-executabilidade em funções C de biblioteca padrão compiladas com gcc. Um
+>   terço sai errado no caso mais fácil possível; o nosso é MSVC 8.0 com FPO.
+>
+> Ver `BINARY_NOTES.md` para as receitas de leitura direta do binário.
+
+Objetivo: ter um índice navegável do `lf2.exe` para localizar rotinas, em vez de
+inferir dos `.dat` ou confiar em reimplementações (F.LF / OpenLF2).
 
 ## 1. Instalar (no WSL Ubuntu)
 
