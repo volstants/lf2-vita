@@ -135,7 +135,31 @@ prática já foram validados de forma cruzada: o assembly grava literalmente `0x
 `0xb4`-`0xb7` (180-183), `0xcd` (205). Estes deixaram de ser convenção e passaram
 a ter endereço.
 
-### 10. Anti-juggle `fall <= 40` · **RISCO MÉDIO**
+### 10. Fonte de aleatoriedade — **AUSENTE NO PORTE** · resolvido no engine, aberto no porte
+
+Item novo, 2026-08-12. Não é "valor sem evidência": é **mecanismo inteiro sem
+contrapartida**. O engine tem 264 pontos de decisão aleatória; o porte tem zero
+(varredura por `rand(`, `srand`, `mt19937`, `random_device`, `uniform_int` em
+`src/`, `tools/`, `tests/` retorna nada).
+
+O lado do engine está **fechado com evidência de Nível A** — tabela de 3000
+bytes em `0x0044FF90`, consumidor `FUN_00417170`, cursores `0x00450C34` (mod
+1234) e `0x00450BCC` (mod 3000). Ver `AUDITORIA_2026-08-12.md#a13`.
+
+O que segue aberto é do nosso lado, e são duas perguntas distintas:
+
+1. **Quantos dos 264 sítios caem em código que o porte já executa?** Sabemos que
+   5 estão em `FUN_0042e100`, a rotina de aplicação de acerto que já auditamos, e
+   que 0 estão no update por tick e 0 em `does_attack_success`. Os outros 259 não
+   foram mapeados.
+2. **O que cada sítio decide?** Nenhum foi reconstruído.
+
+O risco aqui não é errar um número — é implementar qualquer comportamento
+ramificado com `<random>` e nascer divergente por construção, como já aconteceu
+nove vezes com parâmetros. Quando a IA de inimigo entrar, `engine_random` tem que
+entrar antes.
+
+### 11. Anti-juggle `fall <= 40` · **RISCO MÉDIO**
 
 `main.cpp::itrDeals` e os quatro caminhos. Veio do OpenLF2 (`class_global.c:178`).
 Nível C, nunca confirmado no assembly — e o OpenLF2 já errou constantes uma vez
@@ -171,6 +195,7 @@ direto — não delegar a checagem de uma suposição própria.
 | 4 | Anti-juggle `fall <= 40` | baixo | Nível C de uma fonte que já errou |
 | 5 | `FRICTION`/`MIN_SPEED` | médio | afeta locomoção inteira |
 | 6 | `Z_MIN`/`Z_MAX` vs `bg.dat` | baixo | pode já estar certo; é só confirmar quem manda |
+| — | `engine_random` (item 10) | baixo p/ implementar | mas **antes** de qualquer comportamento ramificado, não depois |
 
 Nada disso é bug conhecido. É **superfície não verificada** — que, pela taxa-base
 acima, é onde os próximos bugs estão.

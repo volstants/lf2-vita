@@ -208,3 +208,361 @@ e' um spawn padrao, nao um limite. O item continua aberto na
 
 **`-8.0` (`0x48340`) e `8.0` (`0x47980`)** ja tem uso confirmado: sao os limiares
 de selecao dos frames de queda 180-183 em `0x0040e242`. Ver `AUDITORIA_SUPERFICIE`.
+
+
+## Receita 5 — validar as fronteiras de funcao do decomp
+
+`tools/fn_boundary_check.py`. Desassembla o `.text` uma vez e cruza com os
+rotulos `FUN_` do `lf2_decomp.c`, marcando como LIXO todo endereco que:
+
+- comeca com `int3` (os stubs ja conhecidos);
+- comeca com NOP de alinhamento (`lea 0x0(%esp),%esp`, `mov %edi,%edi`, `nop`);
+- tem um `jmp` imediatamente antes saltando **por cima** dele.
+
+```bash
+python3 tools/fn_boundary_check.py reference/decomp/lf2.exe \
+                                   reference/decomp/lf2_decomp.c \
+  > reference/decomp/FUNCOES_FALSAS.txt
+```
+
+**Resultado na primeira execucao (2026-08-12):**
+
+| Veredito | Quantidade |
+|---|---|
+| entrada de funcao plausivel | 285 |
+| **LIXO — nao e' entrada de funcao** | **187** |
+| prologo atipico (aviso, pode ser FPO real) | 2 |
+| fora do intervalo desassemblado | 7 |
+
+**39% do que o decomp chama de funcao nao e' funcao.** Exemplo verificado a mao:
+
+```
+408d1a:  push %ebp
+408d1b:  jmp  0x408d20        ; salta POR CIMA
+408d1d:  lea  0x0(%ecx),%ecx  ; <- FUN_00408d1d, 3 bytes de NOP
+408d20:  cmp  %edi,%ebx       ; codigo real
+```
+
+**Como usar:** antes de gastar tempo lendo o pseudocodigo de um `FUN_xxxxxxxx`,
+conferir se ele esta em `FUNCOES_FALSAS.txt`. O sintoma no decomp — cascata de
+`unaff_EBP`/`unaff_ESI`/`in_stack_0000...` logo no inicio — e' facil de confundir
+com ruido de FPO; nao e'. E' boundary errado, e ler dali leva a conclusoes sobre
+codigo que nunca executa como entrada.
+
+Prologo atipico e' **aviso, nao veredito**: com FPO, muita funcao real nao comeca
+com `push %ebp`. `FUN_004061d0` cai nesse caso (comeca com `fldl`) e e' funcao
+legitima — foi dela que saiu o `xor %ebx,%ebx` usado para refutar o `+0xEA`.
+
+Origem da ideia: ferramentas de decompilacao assistida detectam fronteira por
+prologo via Capstone. Aqui usamos `objdump`, que ja esta instalado e ja e' a
+nossa camada de Nivel A — sem dependencia nova nem chave de API.
+
+
+## Licoes da avaliacao de ferramentas de decompilacao assistida (2026-08-12)
+
+Avaliados `Caleb-Balboni/AI-Decompiler` (LIEF+Capstone+PyQt6+LLM) e
+`louisgthier/decompai` (LangGraph+Gradio, runner Kali com Ghidra/radare2).
+**Nenhuma das duas adotada.** Uma ideia roubada. As licoes valem mais que o
+veredito.
+
+### 1. Avaliar contra o GARGALO, nao contra a capacidade
+
+As duas fazem coisas impressionantes. Nenhuma ataca o que nos trava. Nosso
+gargalo nao e' **produzir** C decompilado — ja temos 122.667 linhas de Ghidra —
+e' **verificar** contra o assembly. A pergunta certa nao e' "isso e' bom?", e'
+"isso ataca o que me trava?".
+
+### 2. Gerador de artefato derivado AUMENTA a superficie de erro
+
+A taxa-base do projeto: 9 em 9 parametros vindos de fonte derivada (F.LF,
+comunidade, invencao) estavam errados. Uma ferramenta cujo produto e' C gerado
+por LLM a partir do assembly adiciona **mais** material derivado.
+
+E pior que o Ghidra num aspecto especifico: **o Ghidra e' ruim mas honesto.**
+`unaff_ECX_07`, `undefined4`, `in_stack_0000001c` sao sinal VISIVEL de que ele
+esta chutando — foi assim que percebemos o boundary errado em `0x40d6e7`. Um LLM
+produz C limpo e plausivel mesmo quando erra. **A fluencia e' antifeature aqui.**
+
+Botoes tipo "Explain" e "ID Algorithm" sao gerador de corroboracao falsa em forma
+de produto: um modelo dizendo "isto parece calculo de knockback" e' Nivel D
+vestido de Nivel A.
+
+### 3. Checar compatibilidade ANTES de arquitetura
+
+`decompai` diz no README: "x86 Linux ELF binaries only", Windows PE no roadmap.
+Nosso alvo e' PE32. Bloqueio duro, visivel na primeira tela — e eu gastei
+analise de arquitetura antes de conferir o requisito basico.
+
+### 4. A IDEIA vale mais que a FERRAMENTA
+
+As duas ferramentas juntas renderam **uma** ideia aproveitavel: deteccao de
+fronteira de funcao por prologo. Virou `tools/fn_boundary_check.py`, ~100 linhas,
+sem dependencia nova, usando `objdump` que ja tinhamos.
+
+Retorno: **187 dos 481 `FUN_` do decomp nao sao entrada de funcao** (39%).
+Nenhuma das duas ferramentas teria dado isso — a primeira nao roda headless, a
+segunda nao le PE.
+
+### 5. Nao confundir "projeto imaturo" com "ideia ruim"
+
+`AI-Decompiler` tem 2 estrelas e um README que manda clonar a org errada com o
+nome escrito errado. Sinal de maturidade real, e vale registrar. Mas **o
+argumento decisivo nao foi esse** — foi o gargalo. E a ideia que aproveitamos
+veio justamente do projeto de 2 estrelas, nao do de 207.
+
+### 6. Reconhecer quando o fluxo atual JA e' a ferramenta
+
+`decompai` e' um agente conversacional sobre `objdump`, `gdb` e Ghidra. E'
+exatamente o laco que ja executamos: temos bash, o binario, o decomp e as
+ferramentas. Adotar um wrapper para capacidade que ja existe custa dependencia
+sem ganho.
+
+### 7. O que nenhuma das duas resolve
+
+Reconstruir o fluxo de controle de uma funcao especifica — decidir o que
+`0x0042ea8c`-`0x0042ec33` faz — e' raciocinio sobre desvios, nao geracao de
+texto. Continua sendo trabalho manual, e e' onde esta o valor.
+
+---
+
+## Segunda rodada de avaliacao — `LLM4Decompile` e `python-decompile3` (2026-08-12)
+
+Veredito: **nenhum dos dois e' adotavel.** Mas um deles traz um numero que fecha
+uma discussao que ate' aqui vinha sendo feita por intuicao.
+
+### 8. `python-decompile3` — descartado pela Licao 3, em trinta segundos
+
+Decompila **bytecode Python 3.7-3.8**. Nosso alvo e' PE32 i386 compilado com
+MSVC 8.0. Nao existe bytecode Python em lugar nenhum do projeto.
+
+Compatibilidade checada ANTES de arquitetura, que e' exatamente o que a Licao 3
+manda fazer. Custo da avaliacao: um `web_fetch`.
+
+O README, porem, tem uma frase do autor (linhagem `uncompyle6`, 3422 commits no
+problema):
+
+> *"There are numerous bugs in decompilation. And that's true for every other
+> CPython decompiler I have encountered, even the ones that claimed to be
+> 'perfect'."*
+
+E o motivo tecnico que ele da': casar padroes de desvio parou de funcionar
+quando os compiladores comecaram a otimizar, e foi preciso ir para dominadores e
+dominadores reversos.
+
+Isso e' **corroboracao independente da nossa classificacao de Nivel B**. Se vale
+para bytecode Python — que e' de alto nivel, tipado por instrucao, sem registros,
+sem FPO e sem alocacao — vale com muito mais forca para x86 otimizado do MSVC.
+Nao e' evidencia sobre o `lf2.exe`; e' evidencia sobre a *classe* de ferramenta.
+
+### 9. `LLM4Decompile` — incompativel, e o numero publicado explica por que isso importa
+
+Suporte declarado: **Linux x86_64**, GCC O0-O3. Nosso binario e' **PE32 i386,
+MSVC 8.0**. Tres incompatibilidades simultaneas: 32 vs 64 bits, PE vs ELF, MSVC
+vs GCC. O modelo recebe texto de `objdump`, entao tecnicamente aceitaria
+assembly i386 — mas foi treinado so' em x86_64/GCC, e para um modelo estatistico
+"fora da distribuicao em tres eixos" nao e' detalhe.
+
+**O numero.** Eles publicam re-executabilidade medida:
+
+| Modelo | Re-executabilidade |
+|---|---|
+| `llm4decompile-1.3b-v1.5` | 27,3% |
+| `llm4decompile-6.7b-v1.5` | 45,4% |
+| `llm4decompile-6.7b-v2` | 52,7% |
+| `llm4decompile-22b-v2` | 63,6% |
+| **`llm4decompile-9b-v2`** | **64,9%** |
+
+E o benchmark e' o **HumanEval-Decompile**: 164 funcoes C que dependem
+exclusivamente de biblioteca padrao. Funcoes pequenas, autocontidas, de
+livro-texto, GCC, x86_64 — o caso mais facil e mais favoravel possivel.
+
+Ou seja: **o estado da arte, no caso facil, produz codigo que roda certo 65% das
+vezes.** Um terco sai nao-funcional. E "re-executavel" e' uma barra mais BAIXA
+que "semanticamente identico" — uma funcao pode passar nas assercoes e ainda
+errar caso de borda.
+
+Nosso alvo sao metodos `__thiscall` de milhares de linhas com FPO, e a precisao
+que precisamos nao e' "passa nos testes": e' "o limiar e' 30, nao 60" e "o campo
+e' `+0xB8`, nao `+0xEA`". A taxa-base de 9/9 de `AUDITORIA_SUPERFICIE.md` ja
+dizia isso; agora existe numero publicado pelos proprios autores da ferramenta.
+
+Detalhe util: a serie V2 (`LLM4Decompile-Ref`) **refina pseudo-codigo do Ghidra**
+em vez de traduzir assembly cru, e bate a serie end-to-end. Valida o arranjo em
+camadas — mas valida "usar o Ghidra como entrada", que e' o que ja fazemos.
+
+### 10. A ideia que vale roubar: medir COMPORTAMENTO, nao aparencia
+
+O aproveitavel do `LLM4Decompile` nao e' o modelo. E' a metrica.
+
+Eles nao avaliam decompilacao por quanto o codigo *parece* certo — compilam e
+rodam as assercoes originais. Metrica objetiva, nao escore de similaridade.
+
+Nosso analogo seria um **oraculo diferencial contra o LF2 original**: mesma
+sequencia de entrada nos dois engines, comparacao de traco de estado. Isso tira
+o projeto de "verificar constante por constante" e leva para "verificar
+comportamento por atacado".
+
+**Isto deixou de ser especulacao em 2026-08-12.** O mecanismo esta identificado
+e documentado em `AUDITORIA_2026-08-12.md#a13`:
+
+- A aleatoriedade da partida nao vem de `rand()`. Vem de uma **tabela de 3000
+  bytes** em `0x0044FF90`, gerada uma vez, consumida por `FUN_00417170` com dois
+  cursores (`0x00450C34` mod 1234, `0x00450BCC` mod 3000).
+- A tabela e o cursor sao **serializados no `.lfr`** (`0x0043da30` grava,
+  `0x0043e3e0` restaura, `0x0040304a`/`0x00428679` fazem o disco, tamanho
+  `0xbb9`).
+- Por isso o replay exige `.dat` identicos — a mensagem em `0x49b60` diz isso com
+  todas as letras. O `.lfr` guarda **entrada + semente**, e o engine **re-simula**.
+
+Consequencia: **uma partida do LF2 e' funcao deterministica de (tabela, cursores,
+entradas, `.dat`)**. Nao ha PRNG a bit-casar, nao ha ponto flutuante de
+plataforma no sorteio, nao ha relogio. O oraculo e' construivel.
+
+O que falta, e nao e' pouco: reverter o formato do `.lfr` (ha checksum e teste de
+versao), e instrumentar o porte para emitir traco comparavel. E' projeto maior
+que qualquer item aberto da auditoria de superficie. **Registrado como plano, nao
+como proxima tarefa.**
+
+### 11. Contabilidade das quatro ferramentas avaliadas
+
+| Ferramenta | Adotada | O que rendeu |
+|---|---|---|
+| `AI-Decompiler` | nao | fronteira de funcao por prologo → `fn_boundary_check.py` |
+| `decompai` | nao | nada; o fluxo atual ja e' a ferramenta |
+| `python-decompile3` | nao | corroboracao independente do Nivel B |
+| `LLM4Decompile` | nao | 64,9% como teto medido; a ideia do oraculo comportamental |
+
+Quatro avaliacoes, zero adocoes, dois itens de metodo e um script de 100 linhas.
+A licao agregada e' a Licao 4 confirmada: **avaliar ferramenta pela ideia que ela
+carrega, nao pela capacidade que ela anuncia** — e o custo de avaliar assim e'
+baixo o suficiente para continuar fazendo.
+
+---
+
+## Terceira rodada — `Pepper` e `rdecomp` (2026-08-12)
+
+Primeira rodada em que **a compatibilidade passa nos dois**. `Pepper` le' PE32
+x86; `rdecomp` le' PE e x86. A Licao 3 nao descarta nenhum dos dois, entao foi
+preciso avaliar de verdade.
+
+Resultado: **nenhum adotado, e os dois renderam.**
+
+### 12. `Pepper` — nao adotado, mas apontou DOIS lugares que nunca olhamos
+
+`Pepper` e' um visualizador de PE32/PE32+ construido sobre `libpe`. 179 estrelas,
+244 commits, autor serio (o mesmo do `HexCtrl`). GUI Windows, com MFC.
+
+Contra a adocao: tudo que ele mostra — cabecalhos, imports, secoes, recursos —
+nos ja' extraimos com script. A tabela de import saiu em uma chamada de Python
+nesta mesma sessao; os 64 recursos sairam pelo `rsrc_extract.py`. Adotar uma GUI
+para capacidade que ja' temos scriptada, e num fluxo que roda headless em Linux,
+seria andar para tras.
+
+Mas a **lista de features dele funcionou como checklist do que nao tinhamos
+olhado**, e dois itens dessa lista deram resultado:
+
+**Rich Header.** Presente e integro (chave `0x418e5e9a`). Traz a versao de cada
+ferramenta que gerou objeto. Build dominante **50727** = `14.00.50727` = **Visual
+Studio 2005 SP1** — confirmacao independente do "MSVC 8.0" que ate' aqui vinha do
+manifesto e do campo de versao do linker, e mais precisa que eles. De quebra:
+existem objetos de toolchains bem mais antigas (builds `9466`, `9178`, `7299`,
+`4035`), o que indica bibliotecas estaticas ou objetos legados relinkados —
+explica o codigo nao ser estilisticamente uniforme ao longo do `.text`.
+
+**Debug Directory.** **Ausente** (RVA 0, tamanho 0). Nenhuma entrada CodeView,
+logo nenhum caminho de PDB e nenhum nome de arquivo-fonte. Era a aposta de maior
+retorno possivel e deu negativo — o que tambem e' resultado: fecha a porta e
+evita que alguem gaste tempo nela de novo.
+
+Registrado em `AUDITORIA_2026-08-12.md`, no bloco de identificacao do binario.
+
+Licao: **um catalogo de features de uma ferramenta madura vale como lista de
+verificacao, mesmo quando a ferramenta nao vai ser instalada.**
+
+### 13. `rdecomp` — recusado pelo mesmo argumento da Licao 2
+
+Decompilador x86/x64 em Rust, le' ELF e PE. Pipeline completo: loader, descoberta
+de funcao, CFG, IR, passes, geracao de pseudocodigo. 12 commits, 1 estrela,
+`Status: Experimental`, e o README diz com todas as letras que a saida deve ser
+tratada como *"recovered pseudocode, not source-equivalent reconstruction"*.
+
+O argumento decisivo **nao** e' a imaturidade — a Licao 5 existe justamente para
+nao confundir isso. O argumento e' a Licao 2:
+
+> Gerador de artefato derivado AUMENTA a superficie de erro.
+
+`rdecomp` produz exatamente a classe de artefato que ja' rebaixamos a "indice,
+nao fonte": pseudocodigo C de Nivel B. Ja' temos essa camada, produzida pelo
+Ghidra, que e' o estado da arte da categoria. Trocar por uma implementacao de 12
+commits, ou pior, somar uma segunda fonte de Nivel B divergente, e' negativo em
+qualquer cenario.
+
+Dois agravantes especificos, e vale separa-los do argumento principal:
+
+1. Os 559 testes sao **estruturais** (a saida contem um `while`?), nao de
+   re-executabilidade. Nao existe numero de correcao publicado — nesse quesito e'
+   pior que o `LLM4Decompile`, que ao menos publica 64,9%.
+2. Os binarios PE do corpo de teste sao compilados com **gcc** em O1/O2/O3.
+   MSVC 8.0 com FPO e `__thiscall` nao esta coberto.
+
+### 14. A ideia roubada: inventario de campos por deslocamento
+
+O que salvou o `rdecomp` da avaliacao foram dois arquivos do repositorio dele:
+`struct_recovery.rs` e `typing.rs`.
+
+Recuperacao de estrutura **e' exatamente o nosso gargalo**. Todo campo do
+`object_t` foi descoberto de forma REATIVA: um bug aparece, vamos ao assembly,
+achamos `+0xB8`. Foi assim com `fall`, `bdefend` e `shaking` — e por isso os tres
+passaram sessoes inteiras sem existir no porte.
+
+Virou `tools/struct_harvest.py`, ~90 linhas sobre `objdump`, sem dependencia
+nova. Mesmo padrao do `fn_boundary_check.py`: a ideia veio de fora, o codigo e'
+nosso e usa a camada de Nivel A que ja' tinhamos.
+
+Primeira execucao, sobre as tres rotinas ja' auditadas:
+
+```
+deslocamentos distintos: 113   ja provados: 29   candidatos: 84
+```
+
+**84 deslocamentos que o engine toca em codigo que ja' auditamos e que nunca
+olhamos.** Os de maior volume:
+
+| off | R | W | larg | leitura provavel |
+|---|---|---|---|---|
+| `0x194` | 289 | 0 | 4 | tabela global de objetos, `[esi + slot*4]` |
+| `0x364` | 9 | 7 | 4 | vizinho de `+0x368` (`file`) |
+| `0x354` | 8 | 4 | 4 | **indice de slot** — usado como indice em `+0x194` |
+| `0x300`/`0x348`/`0x34C` | 0 | 2-3 | 4 | so' escrita, via `add` — acumuladores |
+| `0xBE`-`0xC5` | 7-2 | 2 | 1 | oito bytes consecutivos, comparados com 5 |
+
+O caso `+0x354` ja' rendeu leitura util em `0x0042e9af`-`0x0042e9c3`: quando a
+vitima e' personagem (`file->type == 0`) e `+0x2f4 == -1`, o dano tambem e'
+somado em `+0x348` do objeto **referenciado pelo `+0x354` do atacante**. Isso e'
+atribuicao de dano ao criador — quem leva o credito quando um projetil acerta.
+
+**Ressalva que precisa ficar colada no resultado.** O script nao sabe para qual
+struct o registrador-base aponta. No bloco de acerto, `%edx` ora e' `object_t`,
+ora e' `itr` (passo 0x50), ora e' `frame`. Prova disso esta na propria saida:
+`0x2c` aparece com 16 leituras e o exemplo e' `cmpl $0x15,0x2c(%edx)` — que nao
+e' `object_t+0x2C`, e' `itr->effect` comparado com 21.
+
+Entao **cada linha da saida e' Nivel D**. O script economiza a busca, nao a
+prova. Usar a saida como mapa de campos seria cometer o vicio que a auditoria de
+superficie documenta, so' que industrializado.
+
+### 15. Contabilidade atualizada — seis ferramentas
+
+| Ferramenta | Adotada | O que rendeu |
+|---|---|---|
+| `AI-Decompiler` | nao | fronteira de funcao por prologo → `fn_boundary_check.py` |
+| `decompai` | nao | nada |
+| `python-decompile3` | nao | corroboracao independente do Nivel B |
+| `LLM4Decompile` | nao | 64,9% como teto medido; oraculo comportamental |
+| `Pepper` | nao | Rich header (VS2005 SP1) e debug dir ausente |
+| `rdecomp` | nao | inventario de deslocamento → `struct_harvest.py` |
+
+Seis avaliacoes, zero adocoes, dois scripts e varios itens de metodo. O padrao
+esta estavel o bastante para virar regra: **nao instalamos ferramenta de
+decompilacao; lemos o que ela se propoe a fazer e implementamos a parte que
+ataca o nosso gargalo em cima do `objdump`.**
