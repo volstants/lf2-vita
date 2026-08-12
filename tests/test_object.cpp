@@ -389,6 +389,31 @@ int main() {
         }
     }
 
+    // ── Ordem dos slots em applyRest, do lado de damageObjects ──────────────
+    // A regressao que isto fixa: `applyRest(hi, o.rehit, dummy)` punha o
+    // contador POR PAR da arma no slot do arest ESCALAR do atacante. Para todo
+    // itr com vrest > 0 (a maioria) a arma recebia `itr->arest` — quase sempre
+    // 0 — e o vrest ia para o descarte, deixando a arma danificavel todo tick.
+    {   int weaponRehit = 0, attackerArest = 0;
+        // itr tipico de golpe: arest 0, vrest 10.
+        lf2::applyRest(/*arest=*/0, /*vrest=*/10, attackerArest, weaponRehit);
+        CHECK(weaponRehit == 10,
+              "arma acertada guarda o VREST do itr (nao o arest)");
+        CHECK(attackerArest == 0,
+              "…e o arest do atacante recebe o do itr, sem piso (tem vrest)");
+
+        // Golpe so' com arest: a arma nao ganha contador de par, o atacante sim.
+        weaponRehit = 0; attackerArest = 0;
+        lf2::applyRest(/*arest=*/15, /*vrest=*/0, attackerArest, weaponRehit);
+        CHECK(attackerArest == 15, "golpe so' com arest trava o ATACANTE");
+        CHECK(weaponRehit == 0,    "…e nao inventa contador por par");
+
+        // Nem arest nem vrest: piso de 4 no atacante (lf2.exe 0x0042f2e4).
+        weaponRehit = 0; attackerArest = 0;
+        lf2::applyRest(0, 0, attackerArest, weaponRehit);
+        CHECK(attackerArest == 4, "sem arest nem vrest: piso de 4 no atacante");
+    }
+
     if (g_fail) { std::printf("\n%d CHECK(S) FAILED\n", g_fail); return 1; }
     std::printf("\nall object tests passed\n");
     return 0;

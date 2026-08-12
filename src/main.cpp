@@ -270,7 +270,7 @@ static bool fighterBody(const lf2::Fighter& f, Box& out) {
 // An attack box also hurts WEAPONS. Each weapon has <weapon_hp>; at 0 it breaks
 // (F.LF weapon.js 'die'), which spawns the broken-weapon effect, oid 999.
 static void damageObjects(const HitInfo& hi, bool fromRight, int skipIdx,
-                          bool attackerArmed);
+                          bool attackerArmed, int& attackerArest);
 
 // Obstacle test: does any grounded object present an itr of kind 14 (LF2's
 // "blocking" box) where the player's body now is? Only weapon1.dat (stone) ships
@@ -536,7 +536,7 @@ static void spawnOpoints(const lf2::Fighter& f, int team) {
 // Apply an attack box to every weapon lying around: durability comes from the
 // weapon's own <weapon_hp>, and at 0 it shatters into broken_weapon.dat (oid 999).
 static void damageObjects(const HitInfo& hi, bool fromRight, int skipIdx,
-                          bool attackerArmed) {
+                          bool attackerArmed, int& attackerArest) {
     for (int i = 0; i < g_objects.SIZE; i++) {
         if (i == skipIdx) continue;                 // never your own held weapon
         lf2::Object& o = g_objects.objs[i];
@@ -553,7 +553,13 @@ static void damageObjects(const HitInfo& hi, bool fromRight, int skipIdx,
             if (!hit && boxOverlap(hi.box, toBox(wb))) hit = true;
         });
         if (!hit) continue;
-        { int dummy = 0; applyRest(hi, o.rehit, dummy); }
+        // `o` e' a ARMA que apanhou — a vitima. Logo `o.rehit` e' o contador POR
+        // PAR (segundo slot), e o escalar do atacante entra no primeiro.
+        // Uma arma e' um objeto com file->type 1/2/3 e entra na mesma varredura
+        // de vitimas que os personagens (lf2.exe FUN_00417400), e a gravacao do
+        // arest em 0x0042f2f7 e' incondicional quanto ao tipo da vitima: socar
+        // uma pedra consome o arest do atacante no original.
+        applyRest(hi, attackerArest, o.rehit);
         if (!o.takeHit(hi.injury, fromRight)) continue;
         // Broke: swap it for the shatter effect at the same spot.
         float bx = o.f.x, by = o.f.y, bz = o.f.z;
@@ -1228,7 +1234,8 @@ int main(int argc, char* argv[]) {
                     }
                     // …and the same swing damages WEAPONS lying around: they have
                     // <weapon_hp> durability (stone 800, knife 200) and break at 0.
-                    damageObjects(hi, player.right, player.heldWeapon, player.heldWeapon >= 0);
+                    damageObjects(hi, player.right, player.heldWeapon, player.heldWeapon >= 0,
+                                  playerArest);
                 }
 
                 // ── held weapon's itr → enemies ──────────────────────────────
@@ -1266,7 +1273,8 @@ int main(int argc, char* argv[]) {
                         }
                     }
                     if (swinging && playerArest == 0) {
-                        damageObjects(whi, player.right, player.heldWeapon, /*attackerArmed=*/true);
+                        damageObjects(whi, player.right, player.heldWeapon, /*attackerArmed=*/true,
+                                      playerArest);
                         // Same two-pass shape as the melee path: collect the legal
                         // victims, then narrow to the closest if the itr is
                         // single-target.

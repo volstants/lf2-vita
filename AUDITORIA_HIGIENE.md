@@ -9,7 +9,7 @@ anteriores. Isto é auto-auditoria, então tratei cada item procurando a evidên
 contrária à minha própria escrita, não a favor.
 
 **Resumo:** 4 dos 7 itens de código se aplicam, sendo **1 deles um bug real
-introduzido hoje**. Os 5 itens de comportamento de projeto **não** se aplicam —
+introduzido hoje** (itens 4 e 5 já corrigidos). Os 5 itens de comportamento de projeto **não** se aplicam —
 é onde o repositório está mais forte.
 
 ---
@@ -158,7 +158,7 @@ descartes), o que era o esperado — o render não alimenta a lógica.
 
 ---
 
-### 5. API usada "quase certa" — **UMA OCORRÊNCIA, introduzida hoje** ⚠
+### 5. API usada "quase certa" — **UMA OCORRÊNCIA** → ✅ **CORRIGIDO 2026-07-30**
 
 `src/main.cpp:548`, dentro de `damageObjects`:
 
@@ -308,7 +308,7 @@ está limpo).
 
 | # | Item | Esforço | Impacto |
 |---|---|---|---|
-| 1 | Bug do `applyRest` em `main.cpp:548` | minutos | comportamento observável |
+| ~~1~~ | ~~Bug do `applyRest` em `main.cpp:548`~~ | — | ✅ feito |
 | 2 | Dois comentários que contradizem o código | minutos | percepção |
 | ~~3~~ | ~~Checagem de erro + `SDL_GetError`~~ | — | ✅ feito |
 | 4 | Pré-carga de assets de projétil | horas | frame time |
