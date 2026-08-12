@@ -21,17 +21,35 @@ Se houver outra cópia conectada (OneDrive), ela está desatualizada — confirm
 com `git log --oneline -1` nas duas e trabalhe só na de commit mais novo. Diga
 no relatório qual você usou.
 
-Leia `HANDOFF.md` primeiro, depois `STATUS.md`.
+Leia `RELATORIO_2026-08-12.md` primeiro, depois `AUDITORIA_SUPERFICIE.md` e
+`AUDITORIA_2026-08-12.md`. `HANDOFF.md` e `STATUS.md` são contexto e histórico —
+em caso de conflito, as auditorias vencem.
 
-Ordem obrigatória das fontes de verdade, quando a dúvida for de mecânica:
+Ordem obrigatória das fontes de verdade, quando a dúvida for de mecânica
+(**revisada em 2026-08-12**; a versão anterior deste arquivo chamava o
+`lf2_decomp.c` de "fonte primária", o que está errado):
 
-1. `reference/decomp/lf2_decomp.c` — decompilação do `lf2.exe` (fonte primária)
-2. `reference/F.LF/` — reimplementação em JS (fallback; já divergiu do binário)
-3. Docs da comunidade (último recurso)
+1. **`lf2.exe`, disassembly** — `objdump -d --start-address= --stop-address=`.
+   É a única fonte primária. Nível **A**.
+2. `reference/decomp/lf2_decomp.c` — pseudocódigo do Ghidra. É **índice, não
+   fonte**. Nível **B**. Serve para localizar a região e formar hipótese; a
+   afirmação sai do assembly. Dois motivos concretos: **187 dos 481 `FUN_` dele
+   não são entrada de função** (`tools/fn_boundary_check.py`), e o melhor
+   decompilador assistido publicado hoje acerta 64,9% em funções C de biblioteca
+   padrão — um terço sai errado no caso fácil.
+3. `reference/OpenLF2/` — reimplementação em C. Nível **C**. Boa pedra de roseta
+   para NOMES de campo; já errou constantes (effect 20/21).
+4. `reference/F.LF/` — reimplementação em JS. Nível **D**.
+5. Docs da comunidade — Nível **D**.
 
-Se as duas primeiras divergirem, o binário vence. Se você não conseguir isolar a
-lógica no decomp depois de uma busca honesta, use o F.LF **e diga no achado que
-não achou no binário** — meia-verdade marcada vale mais que silêncio.
+Se divergirem, o binário vence. Se não conseguir isolar a lógica no assembly
+depois de busca honesta, o veredito é **"não foi possível comprovar"** — não é
+para preencher com o que o F.LF diz e seguir em frente.
+
+**Por que essa ordem é rígida.** Todo parâmetro do porte que veio do F.LF, de
+doc de comunidade ou de invenção, e que foi depois conferido contra o assembly,
+mostrou-se errado: **nove de nove**. A tabela está em `AUDITORIA_SUPERFICIE.md`.
+Qualquer valor sem endereço deve ser presumido errado até prova em contrário.
 
 ## Regras de evidência
 

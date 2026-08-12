@@ -1,3 +1,7 @@
+> Roadmap de features. **Não é fonte de parâmetro de mecânica** — para isso,
+> `AUDITORIA_*.md` (com endereço) e `AUDITORIA_SUPERFICIE.md` (o que ainda não
+> tem). Ponto de entrada do projeto: `RELATORIO_2026-08-12.md`.
+
 # LF2 Vita — Roadmap
 
 **Estado atual (v0.8+, 2026-08-12):** build data-driven rodando na Vita. Player

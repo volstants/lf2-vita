@@ -1,3 +1,10 @@
+> ## ⚠ Critérios de teste ≠ evidência de fidelidade
+>
+> Passar num teste daqui prova que o porte faz o que **nós** decidimos que ele
+> faria. Não prova fidelidade ao LF2 original — isso só sai de
+> `AUDITORIA_*.md`, com endereço. Onde um critério depender de valor Nível D,
+> está marcado no próprio item: anote o observado, não compare com o esperado.
+
 # Roteiro adicional — entrega 2026-08-12 (nucleo de reacao a dano)
 
 Cobre `AUDITORIA_2026-08-12.md`. Esta entrega mexe no que o jogo tem de mais
@@ -48,7 +55,7 @@ cd /mnt/c/Users/rodrigo.chiesa/Documents/LittleFighter2Vita/build && cmake .. &&
 | # | Teste | Esperado |
 |---|---|---|
 | 1 | Firen em corrida em chamas atravessa alvo **já queimando** | Firen **não** toma dano e **não** é interrompido **[N]** |
-| 2 | Alvo parado dentro do fogo do chão do Firen | queima 36 TU e **desaba**; não reacende em ciclo **[N]** |
+| 2 | Alvo parado dentro do fogo do chão do Firen | **desaba** ao fim da queimadura; não reacende em ciclo **[N]** — ⚠ a DURAÇÃO não é critério: `BURN_TICKS = 36` é Nível D, o candidato `+0xEA` foi refutado e como o original sai do state 18 segue em aberto (`AUDITORIA_SUPERFICIE.md` item 1). Anotar a duração observada, não comparar com 36 |
 | 3 | Alvo queimando levando fogo de novo | HP **não** cai a cada nova chama **[N]** |
 | 4 | Firen acerta fogo em quem **não** está queimando | acende normalmente **[R]** |
 | 5 | Soco comum do Dennis (effect 0) | acerta normalmente **[R]** |

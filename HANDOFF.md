@@ -1,6 +1,23 @@
-# LF2 Vita — Handoff (2026-07-25)
+# LF2 Vita — Handoff (2026-07-25, seção 4 corrigida em 2026-08-12)
 
-> **Leia este arquivo primeiro.** Documento autoritativo para continuar o
+> ## ⚠ PRECEDÊNCIA — leia antes de usar qualquer número daqui
+>
+> Este arquivo **não é mais o ponto de entrada**, e **não é autoritativo em
+> matéria de fidelidade**. Ele é de 2026-07-25 e descreve ambiente, arquitetura,
+> controles e armadilhas — isso continua válido. Mas os parâmetros de mecânica
+> foram auditados depois dele e vários mudaram.
+>
+> Ordem de precedência quando dois documentos discordarem:
+>
+> 1. `AUDITORIA_*.md` — achados com endereço no binário. **Sempre vencem.**
+> 2. `AUDITORIA_SUPERFICIE.md` — diz o que ainda NÃO tem evidência.
+> 3. `RELATORIO_2026-08-12.md` — índice e ponto de retomada.
+> 4. este arquivo, `STATUS.md`, `CHECKLIST.md`, `TESTPLAN.md` — contexto e
+>    histórico.
+>
+> Comece por `RELATORIO_2026-08-12.md`.
+
+> Documento de contexto para continuar o
 > desenvolvimento em uma nova instância do Claude.
 > Companheiros: `CHECKLIST.md` (roadmap), `STATUS.md` (bugs/achados),
 > `tools/DECOMPILE.md` (regerar o decomp), **`tools/BINARY_NOTES.md` (ler o
@@ -89,25 +106,67 @@ tools/ghidra_*.py         decompilação (ver seção 7)
 Órfãos (código morto da fase hardcoded, podem ser apagados):
 `src/characters/char.hpp`, `dennis.hpp`, `firen.hpp`.
 
-## 4. Parâmetros de fidelidade (VALIDADOS — não mexer sem fonte)
+## 4. Parâmetros de fidelidade — COM NÍVEL DE EVIDÊNCIA
 
-| Parâmetro | Valor | Fonte |
+> **Esta tabela foi corrigida em 2026-08-12 e o título antigo era perigoso.**
+> Ela se chamava *"VALIDADOS — não mexer sem fonte"* e misturava três coisas
+> muito diferentes: valor lido do binário, valor copiado do F.LF, e valor
+> inventado. Sob esse título, **cinco linhas erradas passaram por validadas**, e
+> foram parte da taxa-base de 9 erros em 9 verificações registrada em
+> `AUDITORIA_SUPERFICIE.md`.
+>
+> Nível **A** = endereço no `lf2.exe`. **C** = OpenLF2. **D** = F.LF, comunidade
+> ou invenção. Dado = vem do `.dat`/asset, não é mecânica.
+
+### Provados no binário (Nível A)
+
+| Parâmetro | Valor | Endereço |
 |---|---|---|
-| Timestep | 30 Hz (`TICK_MS=33`) | LF2 nativo |
-| Gravidade | `1.7` | **binário** `lf2.exe` @0x48348 (double, única ocorrência) — antes só F.LF |
-| Falling Points | começa 0; hit SOMA `fall`; decai **0.45**/tick | F.LF + LF2 Fandom |
-| FP > 40 | Dance of Pain (atordoa em pé) | idem |
-| FP > 60 | knockdown, FP=0 | idem |
-| Valores de `fall` | 1/10/20/25/40/60/70 | idem |
-| Banda de z | `abs(dz) < itr.zwidth`, default **15** | **binário** (F.LF dizia 12 — errado) |
-| Anti-juggle | `fall<=40` NÃO acerta quem está em falling | OpenLF2 |
+| Gravidade | `1.7` | `0x48348` (double, única ocorrência) |
+| Gravidade de arma em voo | `0.425` | `0x48358` |
+| Banda de z | `abs(dz) < itr.zwidth`, default **15** | binário (F.LF dizia 12 — errado) |
 | Âncora | `player.x` É objectX; `left = x - centerx + box.x` | binário |
-| MP | começa em **200** (não cheio); especial cobra `frame.mp`; `mp<0` DRENA | F.LF |
-| `dvx`/`dvz` | SETAM velocidade | F.LF |
-| `dvy` | **ACUMULA** (`vy += dvy`) e chega ao personagem via `Player::drainFrameDvy()` | F.LF |
-| `550` | zera a componente | .dat |
-| Folhas | stride 80px; fronteiras pic 0-69/70-139/140-209 | header |
-| Transparência | Dennis magenta; Firen/cenário/armas **PRETO** | assets |
+| Decaimento de `fall` e `bdefend` | **1 por tick**, inteiro | `0x40da15` (A11) |
+| Faixas de reação | `>60`→tomba (`fall=80`); `>40`→226; `>20`→222/224; `>0`→220 | `0x42eb20`-`0x42ec01` (A8) |
+| Saturação | escolhida a reação, `fall` é **reescrito para o piso da faixa** | `0x42eb6c`/`0x42ebdc`/`0x42ec29` (A8) |
+| 222 vs 224 | por **facing** (mesmo facing = golpe pelas costas = 224) | `0x42ebcb` (A9) |
+| Quebra de guarda | `bdefend > 30`, acumulado por `itr->bdefend` | `0x4300d2` / `0x43008e` (A10) |
+| Golpe defendido | custa `injury/10`, não zero | `0x42ff6a` (A10) |
+| Frame de queda | 180-183 escolhido por `vy` | `0x40e242` |
+| Aleatoriedade | tabela de 3000 bytes + 2 cursores, não `rand()` | `0x44FF90` / `FUN_00417170` (A13) |
+
+### REFUTADOS — estavam nesta tabela como validados e estão errados
+
+| Dizia | Realidade | Onde |
+|---|---|---|
+| `fall` decai **0.45**/tick | decai **1**/tick, inteiro | A11 |
+| `FP > 60` → knockdown, **FP=0** | `fall = 80`; 80 não é zero nem teto, é marcador testado por igualdade em `0x430102` | A8 |
+| Valores de `fall` 1/10/20/25/40/60/70 | as faixas do engine são 20/40/60/80 | A8 |
+| `FP > 40` → Dance of Pain | a faixa existe, mas o contador **não** é acumulador livre: satura no piso | A8 |
+| Quebra de guarda por `fall` | é por `bdefend`, campo separado (`+0xB8`) | A10 |
+
+### Não verificados — NÃO tratar como assentados
+
+| Parâmetro | Valor no porte | Nível | Ver |
+|---|---|---|---|
+| Timestep | 30 Hz (`TICK_MS=33`) | D | superfície item 8 |
+| Anti-juggle | `fall<=40` não acerta quem está caindo | C (OpenLF2) | superfície item 11 |
+| MP inicial | **200** | D (F.LF) | superfície item 4 |
+| Regeneração de MP | 1 a cada 2 ticks | D (invenção pura) | superfície item 5 |
+| `dvx`/`dvz` SETAM velocidade | — | D (F.LF) | — |
+| `dvy` ACUMULA (`vy += dvy`) | via `Player::drainFrameDvy()` | D (F.LF) | — |
+| Velocidades de tombo | `launch(-8.f)`, `vy=-6.f` | D (invenção) | superfície item 2, **RISCO ALTO** |
+| `BURN_TICKS` | 36 | D, candidato `+0xEA` **refutado** | superfície item 1 |
+| `FRICTION`/`MIN_SPEED` | 1.0 / 1.0 | D (F.LF) | superfície item 3 |
+| `Z_MIN`/`Z_MAX` | 365 / 505 | D | superfície item 7 |
+
+### Dados (do `.dat`/assets, não é mecânica)
+
+| Item | Valor |
+|---|---|
+| `550` | zera a componente |
+| Folhas | stride 80px; fronteiras pic 0-69/70-139/140-209 |
+| Transparência | Dennis magenta; Firen/cenário/armas **PRETO** |
 
 ## 5. Controles
 

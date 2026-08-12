@@ -1,3 +1,12 @@
+> ## ⚠ HISTÓRICO, não normativo
+>
+> Este arquivo é um **log por sessão**, mais recente no topo. Ele registra o que
+> se acreditava **na época de cada entrada**, e várias dessas crenças foram
+> depois refutadas contra o assembly. Não use número daqui como fonte.
+>
+> Precedência: `AUDITORIA_*.md` > `AUDITORIA_SUPERFICIE.md` >
+> `RELATORIO_2026-08-12.md` > este arquivo.
+
 # LF2 Vita — Estado da sessao (2026-08-12)
 
 ## Sessao 2026-08-12 — nucleo de reacao a dano, do assembly
@@ -212,6 +221,14 @@ Achados do OpenLF2 já aplicados (2026-07-24):
   CORRIGIDO no guard de colisão do player→inimigo.
 - Matemática de âncora/caixa CONFIRMADA idêntica: `left = x - centerx + box.x` (right) /
   `x + centerx - w - box.x` (left), `top = y - centery + box.y`. Meu fix da âncora estava certo.
+> **⚠ REFUTADO EM 2026-08-12 — não citar este parágrafo.** O modelo abaixo veio
+> das docs da comunidade e está errado no essencial: o contador **não** é
+> acumulador livre, ele é reescrito para o piso da faixa a cada reação
+> (`0x42eb6c`/`0x42ebdc`/`0x42ec29`); `FP>60` não zera, grava `fall = 80`, que é
+> marcador de tombo testado por igualdade em `0x430102`; e as faixas do engine
+> são 20/40/60/80, não 1/10/20/25/40/60/70. Ver A8 em
+> `AUDITORIA_2026-08-12.md`. Mantido aqui só como registro do que se acreditava.
+
 Contador de fall CORRIGIDO (docs da comunidade, LF2 Fandom "Falling"): modelo era
 INVERTIDO. Real = Falling Points: FP começa 0, hit SOMA o `fall` do itr, decai 1/frame.
 FP>40 = Dance of Pain (atordoado em pé); FP>60 = knockdown, FP=0. Valores de fall

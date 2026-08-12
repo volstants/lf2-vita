@@ -259,10 +259,23 @@ git push
 Cole isto no chat novo:
 
 ```
-Projeto LF2 Vita, pasta LittleFighter2Vita. Leia primeiro
-RELATORIO_2026-08-12.md — ele é o índice da sessão anterior e explica o método.
-Depois leia AUDITORIA_SUPERFICIE.md (a taxa-base de 9/9 e os vícios de processo)
-e tools/BINARY_NOTES.md (as receitas de leitura do binário).
+Projeto LF2 Vita, pasta LittleFighter2Vita.
+
+Leitura obrigatória antes de qualquer coisa, nesta ordem:
+  1. RELATORIO_2026-08-12.md      — índice da sessão anterior e o método
+  2. AUDITORIA_SUPERFICIE.md      — taxa-base de 9/9 e os dois vícios de processo
+  3. AUDITORIA_2026-08-12.md      — achados A8-A13 e identificação do binário
+  4. tools/BINARY_NOTES.md        — receitas de leitura do binário
+
+(AUDITORIA_2026-07-30.md tem A1-A7; leia se o assunto encostar neles.)
+
+Ferramentas nossas, use antes de sair desassemblando à mão:
+  tools/struct_harvest.py     inventário de campos por deslocamento num intervalo
+                              do .text. Saída é Nível D: o script não sabe para
+                              qual struct o registrador-base aponta.
+  tools/fn_boundary_check.py  187 dos 481 FUN_ do lf2_decomp.c não são entrada
+                              de função. Confira antes de citar pseudocódigo.
+  tools/datdump               parser dos .dat, imprime itr com arest/vrest.
 
 Metodologia S em vigor: você é auditor de fidelidade. Ordem obrigatória —
 localizar a rotina no lf2.exe, desassemblar, reconstruir o fluxo, e só então
@@ -288,17 +301,44 @@ Três opções, em ordem de retorno esperado:
 **(a) Velocidades de tombo — maior retorno de fidelidade.**
 ```
 Fechar o item 2 de AUDITORIA_SUPERFICIE.md: as velocidades de lançamento do
-knockdown. Hoje são launch(-8.f) e vy = -6.f, ambas inventadas. Isolar no
-assembly quais constantes o bloco de tombo de FUN_0042e100 realmente carrega
-para y_velocity, e corrigir. Se não der para isolar, dizer isso e parar.
+knockdown. Hoje são launch(-8.f) e vy = -6.f, ambas inventadas.
+
+O alvo é FUN_0042e100, a MESMA rotina que A8-A12 já auditaram — leia esses
+achados antes de tocar no disassembly, porque a acumulação de fall, a saturação
+no piso da faixa e a seleção 222/224 já estão provadas com endereço e não é para
+redescobrir nada disso.
+
+Comece rodando:
+  python3 tools/struct_harvest.py reference/decomp/lf2.exe 0x42e100 0x430200
+para ter o inventário de deslocamentos do bloco antes de ler linha por linha.
+
+Depois isolar quais constantes do pool o ramo de tombo carrega para y_velocity
+(+0x40) ou vy (+0x48). Candidatos conhecidos: ±6.0 em 0x447940/0x449af0 e ±3.0
+em 0x447a40/0x449050 — ambos são candidatos, nenhum é evidência ainda.
+
+Atenção à armadilha já registrada: o -8.0 em 0x448340 COINCIDE com o nosso
+launch(-8.f), mas ali ele é limiar de seleção de frame, não velocidade. A
+coincidência é enganosa e não serve de prova.
+
+Se não der para isolar, o veredito é "não foi possível comprovar" e a sessão
+para aí. Não preencher com inferência plausível.
 ```
 
 **(b) Colher os campos candidatos — maior retorno estrutural.**
 ```
 Rodar tools/struct_harvest.py sobre as faixas do .text ainda não auditadas e
-atacar os candidatos de maior volume: +0x194 (tabela global de objetos), +0x354
-(índice de slot / criador), +0x300/+0x348/+0x34C (acumuladores) e os oito bytes
-em +0xBE-0xC5. Cada um confirmado no disassembly antes de virar afirmação.
+atacar os candidatos de maior volume, na ordem: +0x194 (tabela global de
+objetos, 289 leituras), +0x354 (índice de slot, usado como índice em +0x194),
++0x300/+0x348/+0x34C (acumuladores, só escrita via add) e os oito bytes
+consecutivos em +0xBE-0xC5 (comparados com 5 em 0x40e17a).
+
+A seção 3.4 de RELATORIO_2026-08-12.md tem o que já se sabe de cada um, e a
+leitura parcial de +0x354 em 0x0042e9af-0x0042e9c3.
+
+Regra: a saída do script é Nível D. O registrador-base pode ser object_t, itr,
+bdy ou frame, e o script não distingue — a prova de que isso importa está na
+própria saída, onde 0x2c aparece com 16 leituras sendo na verdade itr->effect.
+Cada campo só vira afirmação depois de confirmado no disassembly.
 ```
 
 **(c) Testar no device.**
@@ -314,7 +354,46 @@ correção acumulada sem validação em hardware real.
 
 ---
 
-## 6. Mapa dos documentos
+## 6. Precedência entre documentos — e o conflito que já existia
+
+São 11 arquivos `.md`, escritos ao longo de três semanas, e **eles não
+concordam entre si**. Auditoria feita em 2026-08-12; três conflitos reais foram
+encontrados e corrigidos:
+
+**`HANDOFF.md` §4 era o pior.** A tabela se chamava *"Parâmetros de fidelidade
+(VALIDADOS — não mexer sem fonte)"* e misturava, sob o mesmo carimbo de
+validado, valor lido do binário (gravidade `1.7` @`0x48348`) com valor copiado
+do F.LF (`fall` decai `0.45`/tick) e com invenção. **Cinco linhas erradas
+estavam ali como assentadas** — as mesmas que depois compuseram a taxa-base de
+9/9. Reescrita em três blocos: provados no binário com endereço, refutados, e
+não verificados com nível de evidência declarado.
+
+**`REVIEW_PROMPT.md` chamava o `lf2_decomp.c` de "fonte primária".** Contradizia
+frontalmente a hierarquia atual, onde o decomp é Nível B — índice, não fonte.
+Corrigido, com os dois motivos concretos: 187 dos 481 `FUN_` dele não são
+entrada de função, e o melhor decompilador assistido publicado acerta 64,9% no
+caso fácil.
+
+**`TESTPLAN.md` item 2** usava "queima 36 TU" como critério de aprovação, quando
+`BURN_TICKS = 36` é Nível D e o candidato `+0xEA` foi refutado. O critério virou
+"anotar a duração observada", sem comparação.
+
+### A ordem, quando dois documentos discordarem
+
+```
+1. AUDITORIA_*.md            achado com endereço no binário — SEMPRE vence
+2. AUDITORIA_SUPERFICIE.md   diz o que ainda NÃO tem evidência
+3. RELATORIO_2026-08-12.md   índice e ponto de retomada
+4. HANDOFF / STATUS /        contexto, histórico e roadmap.
+   CHECKLIST / TESTPLAN      Nunca fonte de parâmetro de mecânica.
+```
+
+`HANDOFF.md`, `STATUS.md` e `TESTPLAN.md` receberam banner de precedência no
+topo. Se um documento novo for criado, ele nasce no nível 4 até ter endereço.
+
+---
+
+## 7. Mapa dos documentos
 
 | Arquivo | O que é |
 |---|---|
