@@ -1,4 +1,7 @@
 # LF2 Vita — Relatório de sessão e ponto de retomada · 2026-08-12
+> **Duas sessões nesta data.** A primeira produziu A13 e as ferramentas (§3).
+> A segunda produziu A14-A19 e é o que importa para retomar (§8). Onde as duas
+> discordarem, vale §8.
 
 > **Este arquivo é o ponto de entrada para a próxima sessão.** Ele resume o que
 > foi feito, por que o método é o que é, e o que fazer a seguir. Os detalhes
@@ -221,19 +224,17 @@ Toolchain da Vita não existe na sandbox — o build do device é sempre seu.
 ?? RELATORIO_2026-08-12.md
 ```
 
-**Aberto, por prioridade** (detalhe em `AUDITORIA_SUPERFICIE.md`):
+**Aberto, por prioridade** — *lista da primeira sessão; ver §8 para a atual*:
 
-1. **Velocidades de tombo** — `launch(-8.f)` e `vy = -6.f`, ambos inventados.
-   Risco ALTO: governam a sensação de todo knockdown. Candidatos no pool: `±6.0`
-   (`0x447940`/`0x449af0`) e `±3.0` (`0x447a40`/`0x449050`).
+1. ~~Velocidades de tombo~~ — **fechado em §8** (A14/A16).
 2. **Como o original sai do state 18** (queimadura). O candidato `+0xEA` foi
    refutado por busca exaustiva; o sítio de ignição `0x0042fd76` não grava
    cronômetro nenhum. Hipótese em aberto: pode não existir contador.
-3. `mp_start = 200` (F.LF) e regeneração de MP a cada 2 ticks (invenção pura).
+3. ~~`mp_start` e regeneração de MP~~ — **fechado em §8** (A18).
 4. Anti-juggle `fall <= 40` — Nível C, do OpenLF2, que já errou uma vez.
 5. `FRICTION`/`MIN_SPEED`, `Z_MIN`/`Z_MAX`, `TICK_MS`.
-6. A7 (teto de `arest` em 12) e A12 (`shaking`/hitstop, consumidor não isolado).
-7. Os 84 candidatos do `struct_harvest.py`.
+6. A7 (teto de `arest` em 12). ~~A12~~ — **fechado em §8** (A17).
+7. Os candidatos do `struct_harvest.py` — 14 confirmados em §8 (A19).
 
 **Dívida de higiene** (`AUDITORIA_HIGIENE.md`, fazer **depois** do teste no
 device): unificar os quatro caminhos de ataque de `main.cpp` num `resolveHit()`;
@@ -421,3 +422,200 @@ topo. Se um documento novo for criado, ele nasce no nível 4 até ter endereço.
 (fronteiras de função — 187 dos 481 `FUN_` do decomp não são entrada de função),
 `rsrc_extract.py`, `bmp2png.py`, `datdump.cpp`, `ghidra_export_c.py`,
 `host_sdl.sh`.
+
+---
+
+## 8. Segunda sessão de 2026-08-12 — o mecanismo de empurrão · **PONTO DE RETOMADA ATUAL**
+
+Sessão de auditoria pura. **Nenhuma linha do porte mudou.** Seis achados novos,
+todos Nível A, em `AUDITORIA_2026-08-12.md` (A14-A19).
+
+### 8.1 O que se descobriu, em uma frase
+
+O LF2 **não aplica empurrão no instante do acerto**. Ele acumula, congela os
+dois lutadores, e só depois converte o acumulado em velocidade, dividindo pelo
+número de golpes daquele tick. O porte faz as três coisas de outro jeito.
+
+### 8.2 A cadeia completa, com endereço em cada elo
+
+```
+FUN_0042e100  (aplicação do acerto)
+  ├─ vítima->attacks (+0x20) += 1                       0x0042ea88 / 0x0043009b
+  ├─ vítima->+0x28 += itr->dvx                          0x0042ee5b, +9 sítios
+  ├─ se fall == 80:                                     0x0042f18a
+  │    vítima->+0x30 += itr->dvy                        0x0042f1cd
+  │    ou, se itr->dvy == 0:  -= 7.0                    0x0042f215  (0x00447a50)
+  │    trava de chão: se (y + v) > 0 → 12.0             0x0042f1f6  (0x00448338)
+  │    frame 180 ou 186 pelo sinal de +0x28 vs facing   0x0042f21e-0x0042f258
+  ├─ atacante->shaking (+0xB4) = +3                     0x004300a6
+  └─ vítima->shaking          = -5                      0x004300b7
+
+FUN_0040e490  (primeira coisa do tick de cada objeto)
+  └─ se shaking != 0: anda 1 em direção a zero e RETORNA  0x0040e494-0x0040e4c2
+       (objeto não anda, não cai, não avança frame, não decai fall/bdefend)
+
+FUN_004196f0  (uma vez por tick, 400 slots, chamada em 0x0041f540)
+  ├─ se shaking != 0: pula o slot, NÃO zera acumulador  0x0041970c
+  └─ se attacks != 0:
+       x_velocity = (+0x28 * 2.0) / (attacks + 1)       0x0041971e-0x00419730
+       y_velocity = (+0x30 * 2.0) / (attacks + 1)       0x00419735-0x0041974a
+       z_velocity = (+0x38 * 2.0) / (attacks + 1)       0x0041974f-0x00419764
+       attacks = 0 ; acumuladores = 0                   0x00419769-0x0041977c
+
+0x0040de38   desenho: deslocamento lateral 6n-3 só se shaking < 0
+```
+
+`2.0` está em `0x004479e0`. Com **um** golpe no tick a conta dá exatamente o
+acumulado — é por isso que `-7.0` é o número certo para o caso simples, e é por
+isso que copiar só o `-7.0` para o porte reproduziria o caso simples e erraria
+todo o resto.
+
+### 8.3 O layout do `object_t` que isso obrigou a corrigir
+
+Três trincas de `double` consecutivas, provadas no construtor `FUN_004061d0`
+(`0x004061da`-`0x0040621c`) e no "zerar tudo" de `0x00430de6`-`0x00430e18`:
+
+| Offsets | Papel | Como se prova |
+|---|---|---|
+| `+0x28`/`+0x30`/`+0x38` | **acumulador de empurrão** x/y/z | A16 |
+| `+0x40`/`+0x48`/`+0x50` | velocidade efetiva x/y/z | gravidade em `+0x48` (`0x0040e788`) |
+| `+0x58`/`+0x60`/`+0x68` | posição x/y/z | integração (`0x0040e51d`, `0x0040e587`, `0x0040e6c2`) |
+
+O `object.h` do OpenLF2 chama a primeira trinca de
+`pic_x_gain`/`y_accl`/`z_accl`. **Está errado.** Nível C serve para nome, não
+para semântica.
+
+Também: `+y` aponta para **baixo** (gravidade `+1.7` em `+0x48`, `y += vy`),
+então lançamento para cima é negativo.
+
+### 8.4 MP — o item mais barato da lista era o mais errado
+
+`mp` é `+0x308`, começa em **500** (`0x004063e1`), e regenera **todo tick**:
+
+```
+mp += (500 - min(hp, 500)) / 100 + 1          0x0041fa90-0x0041faf2
+```
+
+`+1`/tick com HP cheio, `+6`/tick com HP zerado. Dados de `id` 51 e 52 têm o
+`hp` dividido por 2 antes da conta. O porte usa `200` inicial e `0,5`/tick — 2×
+a 12× lento.
+
+`+0x300`, que parecia ser `mp`, é o **teto recuperável** (a barra escura): cai
+`dano/3` por golpe (`0x0042e97d`) e limita o `hp` por cima (`0x00418130`).
+
+### 8.5 A taxa-base agora é 13/13
+
+Quatro linhas novas na tabela de `AUDITORIA_SUPERFICIE.md`. Três delas erraram
+por mais do que um número: erraram o **mecanismo**. Não existe constante de
+lançamento; existe acumulador com commit dividido. Não existe taxa fixa de MP;
+existe função do dano sofrido.
+
+O padrão vale registrar: **quando um parâmetro inventado está errado, o mais
+provável não é que o número certo seja outro — é que a estrutura em volta dele
+não exista no original.** Foi assim com `fp`/`fall` (A8), com `bdefend` (A10),
+e agora com `launch()` (A14/A16) e com a regeneração de MP (A18).
+
+### 8.6 Como esta sessão foi conduzida — o que funcionou
+
+- `struct_harvest.py` rodou primeiro, como o plano mandava. **A saída não
+  continha a resposta** — `+0x30` aparece na lista sem nenhum destaque, e o
+  campo decisivo (`+0x20`, `attacks`) já estava marcado como "provado". O que
+  fechou o caso foi um **inventário exaustivo** de um único offset: as 10
+  instruções do `.text` que tocam `0x30(%reg)` com base diferente de `esp`.
+  Vale virar modo do script.
+- A pergunta que destravou tudo foi *"quem LÊ este campo?"*, não *"quem escreve"*.
+  O bloco de tombo escrevia num campo que nada lia — o que forçou procurar o
+  consumidor, e o consumidor era um passo separado do pipeline.
+- O `lf2_decomp.c` foi usado uma vez, para confirmar que a lista de leitores de
+  `+0x30` estava completa. Uso correto de Nível B: **corroborar uma ausência**,
+  não fornecer um valor.
+- Armadilha nova, registrada em A19: o struct do `.dat` de personagem tem
+  `double` em `+0x20`-`+0x48` também (`running_speed`, `running_speedz`,
+  `heavy_walking_speed`...), provado pela rotina de dump em
+  `0x0040d185`-`0x0040d22a`. Duas leituras de `0x30(%ecx)` que pareciam do
+  objeto são do `.dat`.
+
+### 8.7 Estado do repositório
+
+Nenhuma mudança em `src/`, `tests/`, `tools/`. 238 CHECKs continuam válidos
+(não foram reexecutados — nada mudou). Arquivos alterados nesta sessão:
+
+```
+ M AUDITORIA_2026-08-12.md      A14-A19; A12 marcado como superado por A17
+ M AUDITORIA_SUPERFICIE.md      taxa-base 13/13; itens 2, 4 e 5 fechados; item 12 novo
+ M RELATORIO_2026-08-12.md      esta seção
+```
+
+### 8.8 Prompt de abertura da próxima sessão
+
+```
+Projeto LF2 Vita, pasta LittleFighter2Vita. Port nativo do Little Fighter 2 para
+PS Vita em C++17, interpretando os .dat originais em runtime.
+
+═══ LEITURA OBRIGATÓRIA, NESTA ORDEM ═══
+  1. RELATORIO_2026-08-12.md §8   ponto de retomada atual e o método
+  2. AUDITORIA_2026-08-12.md      A14-A19 primeiro; A8-A13 se o assunto encostar
+  3. AUDITORIA_SUPERFICIE.md      taxa-base de 13/13 e os vícios de processo
+  4. tools/BINARY_NOTES.md        receitas de leitura do binário
+(AUDITORIA_2026-07-30.md tem A1-A7.)
+
+═══ PRECEDÊNCIA ═══
+  1. AUDITORIA_*.md            achado com endereço no binário — SEMPRE vence
+  2. AUDITORIA_SUPERFICIE.md   diz o que ainda NÃO tem evidência
+  3. RELATORIO §8              índice e ponto de retomada
+  4. HANDOFF / STATUS /        contexto e histórico. NUNCA fonte de parâmetro.
+     CHECKLIST / TESTPLAN
+
+═══ MÉTODO (Metodologia S) ═══
+Auditor de fidelidade, não implementador com pressa.
+Fontes: A lf2.exe/objdump · B lf2_decomp.c (índice) · C OpenLF2 (só NOMES, e
+A19 mostrou que até os nomes erram) · D F.LF e comunidade.
+Nada entra no porte sem endereço do binário. Se não der para provar, o veredito
+é "não foi possível comprovar" e passa para o próximo item.
+Duas perguntas que renderam nesta sessão e valem repetir:
+  - "quem LÊ este campo?" antes de "quem escreve"
+  - inventário EXAUSTIVO de um offset (todas as instruções do .text que o tocam)
+    fecha o que a varredura ampla do struct_harvest só sugere
+
+═══ PLANO DA SESSÃO ═══
+A auditoria do núcleo de dano está fechada de A8 a A19. O gargalo mudou de lado:
+agora é IMPLEMENTAÇÃO, e há evidência pronta esperando.
+
+1. IMPLEMENTAR O PIPELINE DE EMPURRÃO  (A16 + A17 + A14 + A15)
+   Ordem obrigatória, porque cada um depende do anterior:
+   a) acumulador dvx/dvy/dvz separado da velocidade efetiva
+   b) contador de golpes por tick, zerado no commit
+   c) passo de commit: v = (acumulado * 2.0) / (golpes + 1)
+   d) hitstop: shaking congela o tick inteiro do objeto e adia o commit
+   e) impulso de tombo: itr->dvy, ou -7.0 quando dvy == 0
+   f) frame 180 vs 186 pelo sinal do empurrão contra o facing
+   Testes: o caso de um golpe tem de dar exatamente o valor do itr; o de dois
+   golpes no mesmo tick tem de dar (a1+a2)*2/3. Reescrever, não silenciar, os
+   testes que codificam o modelo antigo.
+
+2. MP  (A18) — mp = 500, regen (500-min(hp,500))/100 + 1 por tick, id 51/52 com
+   hp/2. É o mais barato e o de maior erro medido.
+
+3. SE SOBRAR TEMPO, AUDITORIA:
+   - `+0x340`, divisor de dano em 0x0042e8c6: dano = injury*100 / +0x340.
+     Campo novo, semântica não revertida. Pode ser dificuldade.
+   - anti-juggle `fall <= 40` do porte (Nível C) — A16 mostrou que o anti-juggle
+     real é a divisão por (golpes+1); o `40` do binário faz outra coisa
+     (0x0042f1bc: só para file->type 2 e 3).
+   - saída do state 18 (queimadura), sem candidato desde a refutação de +0xEA.
+
+4. FECHAMENTO
+   Abrir AUDITORIA da data nova com o que for auditado, atualizar
+   AUDITORIA_SUPERFICIE.md e o RELATORIO com o novo ponto de retomada.
+
+Se travar num item, diga por que travou e vá para o próximo.
+
+═══ FORA DO PLANO, MAS PRIORITÁRIO SE ACONTECER ═══
+Resultado de teste no device (TESTPLAN.md, 39 itens, nenhum executado) passa na
+frente de tudo. Atenção: os itens que medem knockdown vão medir o modelo velho
+até o item 1 acima entrar.
+
+═══ PROTOCOLO DE ENTREGA ═══
+Toda vez que um arquivo mudar, me mande o comando de build. Quando fechar uma
+versão major, me mande também o comando de commit.
+```

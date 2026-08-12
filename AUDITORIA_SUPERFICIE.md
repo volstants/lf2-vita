@@ -1,4 +1,6 @@
 # Auditoria de superfície não verificada · 2026-08-12
+> **Segunda passada, mesma data.** Os itens 2, 4 e 5 foram fechados com
+> evidência de Nível A (achados A14-A18). A taxa-base subiu de 9/9 para 13/13.
 
 Motivação: os achados A8-A11 fecharam quatro parâmetros que vinham do F.LF ou de
 invenção própria. **Os quatro estavam errados.** Vale olhar o que ainda está na
@@ -20,9 +22,17 @@ invenção, e que foi **depois** conferido contra o assembly, mostrou-se errado:
 | `arest`/`vrest` fundidos, default 8 | invenção | **errado** → campos distintos, piso 4 (`0x42f2e4`) |
 | knockback zerado em re-acerto | invenção | **errado** → `dvx` sempre (`0x42ee5b`) |
 | frame de queda fixo em 180 | invenção | **errado** → 180-183 por vy (`0x40e242`) |
+| `launch(-8.f)` no tombo | invenção | **errado** → `-7.0` só como padrão, e via acumulador (`0x42f215`) |
+| `vy = -6.f` no tombo | invenção | **errado** → não existe; o `itr->dvy` manda (`0x42f1cd`) |
+| `mp_start = 200` | F.LF `global.js` | **errado** → `500` (`0x4063e1`) |
+| regen de MP `1` a cada 2 ticks | invenção | **errado** → `(500-hp)/100 + 1` **por tick** (`0x41faf2`) |
 
-**Nove de nove.** Isso não é azar: é o que acontece quando uma reimplementação
+**Treze de treze.** Isso não é azar: é o que acontece quando uma reimplementação
 clean-room (F.LF) e a intuição de quem escreve o porte são tratadas como fonte.
+As quatro linhas novas saíram desta segunda passada, e três delas erraram por
+**mais** do que um valor: erraram o mecanismo. Não existe constante de
+lançamento; existe acumulador com commit dividido. A regeneração de MP não é
+uma taxa fixa; é função do dano sofrido.
 A conclusão prática é que **qualquer valor abaixo que ainda esteja sem endereço
 do binário deve ser presumido errado até prova em contrário**, e não o inverso.
 
@@ -78,15 +88,26 @@ original não tem.
 como o original sai do state 18 — segue **sem resposta** e não deve ser fechada
 por analogia.
 
-### 2. `launch(-8.f)` e `vy = -6.f` — velocidade do tombo · **RISCO ALTO**
+### 2. ~~`launch(-8.f)` e `vy = -6.f` — velocidade do tombo~~ · **FECHADO — A14/A16**
 
-`player.hpp::hit()`. Ambos inventados. O `-8.0` coincide com a constante
-`0x448340`, mas ali ela é **limiar de seleção de frame**, não velocidade de
-lançamento — a coincidência é enganosa e não serve de evidência.
+Os dois estavam errados, e nenhum dos candidatos do pool era o certo. `±6.0` e
+`±3.0` **não** entram no tombo. O `-8.0` de `0x448340` era mesmo coincidência:
+confirmado nesta sessão como limiar de seleção dos frames 180-183 em
+`0x0040e7c1`.
 
-O pool de constantes tem `±6.0` (`0x447940`/`0x449af0`) e `±3.0`
-(`0x447a40`/`0x449050`), ambos referenciados no bloco de acerto. São candidatos.
-**Não verificado.**
+O que o engine faz (A14, A16):
+
+- o impulso vertical do tombo é `itr->dvy`, e **`-7.0`** (`0x00447a50`) só
+  quando o `itr` não traz `dvy`;
+- ele não vai para `y_velocity`, vai para um **acumulador** em `+0x30`;
+- um passo separado por tick, `FUN_004196f0`, faz
+  `y_velocity = (acumulado × 2.0) / (golpes_do_tick + 1)`;
+- com um só golpe a conta dá exatamente o acumulado, então **`-7.0` é o número
+  do caso simples** — mas o mecanismo não é uma constante de lançamento;
+- `shaking` adia esse commit (A17): o empurrão sai **depois** do hitstop.
+
+Sobra em aberto, e com endereço: reverter a semântica de `+0x340` (divisor de
+dano, `0x0042e8c6`) e confirmar se `dvy` nos `.dat` é negativo para cima.
 
 ### 3. `FRICTION = 1.0` e `MIN_SPEED = 1.0` · **RISCO MÉDIO**
 
@@ -94,16 +115,22 @@ O pool de constantes tem `±6.0` (`0x447940`/`0x449af0`) e `±3.0`
 locomoção. Valores redondos e plausíveis, mas foi exatamente isso que se disse do
 `0.45`.
 
-### 4. `mp = 200` no início · **RISCO MÉDIO**
+### 4. ~~`mp = 200` no início~~ · **FECHADO — A18**
 
-`fighter.hpp:177`, F.LF `global.js: mp_start = 200`. Afeta quantos especiais o
-jogador tem no primeiro minuto. Fácil de verificar (é um `movl` na inicialização
-do objeto) e ninguém verificou.
+É **500** (`0x004063ca`-`0x004063e1`, o mesmo `movl $0x1f4` que carrega `hp`,
+`hp` máximo e o teto recuperável). O campo também estava mal endereçado no
+raciocínio anterior: `mp` é `+0x308`, não `+0x300` — `+0x300` é o teto
+recuperável, que cai `dano/3` por golpe (`0x0042e97d`).
 
-### 5. Regeneração de MP — 1 a cada 2 ticks · **RISCO MÉDIO**
+### 5. ~~Regeneração de MP — 1 a cada 2 ticks~~ · **FECHADO — A18**
 
-`player.hpp::tickInner`, `(++mpRegenAcc & 1) == 0`. Sem fonte declarada nenhuma —
-nem F.LF. É invenção pura, e governa o ritmo de especiais do jogo inteiro.
+O engine regenera **todo tick**, e a taxa cresce com o dano sofrido:
+`mp += (500 − min(hp,500)) / 100 + 1` (`0x0041fa90`-`0x0041faf2`). De `+1`/tick
+com HP cheio a `+6`/tick com HP zerado. Os dados de `id` 51 e 52 têm o `hp`
+dividido por 2 antes da conta.
+
+O porte estava entre 2× e 12× lento, dependendo do HP. Era o item de menor
+custo de verificação da lista e o de maior erro medido.
 
 ### 6. `launch(-6.f)` na promoção de queda · **RISCO BAIXO, mas é INFERÊNCIA declarada**
 
@@ -159,11 +186,31 @@ ramificado com `<random>` e nascer divergente por construção, como já acontec
 nove vezes com parâmetros. Quando a IA de inimigo entrar, `engine_random` tem que
 entrar antes.
 
-### 11. Anti-juggle `fall <= 40` · **RISCO MÉDIO**
+### 11. Anti-juggle `fall <= 40` · **RISCO MÉDIO** — parcialmente encostado
 
 `main.cpp::itrDeals` e os quatro caminhos. Veio do OpenLF2 (`class_global.c:178`).
 Nível C, nunca confirmado no assembly — e o OpenLF2 já errou constantes uma vez
 (effect 20/21).
+
+**Encostado por A14 e A16, sem ser resolvido.** O `40` existe no binário, mas
+num papel diferente do que o porte usa: em `0x0042f1bc` e `0x0042f205`,
+`itr->fall <= 40` cancela o impulso vertical **quando a vítima é `file->type` 2
+ou 3** — arma pesada ou objeto de efeito, não personagem. E existe um
+anti-juggle real que o porte não tem: a divisão por `golpes_do_tick + 1` no
+commit (A16). Nenhum dos dois é o `fall <= 40` do `itrDeals`. O item continua
+Nível C.
+
+### 12. Nomes de campo do OpenLF2 para `+0x28`/`+0x30`/`+0x38` · **REFUTADOS**
+
+Item novo. `object.h` do OpenLF2 chama `+0x28` de `pic_x_gain`, `+0x30` de
+`y_accl` e `+0x38` de `z_accl`. A16 prova que os três são o **acumulador de
+empurrão** x/y/z, pareado com `+0x40`/`+0x48`/`+0x50`.
+
+Isso não derruba o OpenLF2 como pedra de roseta — os nomes que ele deu a
+`+0x40`, `+0x48`, `+0x50`, `+0x58`, `+0x60`, `+0x68`, `+0xB0`, `+0xB4`, `+0xB8`
+continuam batendo com o assembly. Mas confirma o que a hierarquia já dizia:
+**Nível C é bom para nome, não para semântica.** Onde ele escreveu `_unknown`
+ou chutou, o chute vale zero.
 
 ---
 
@@ -190,12 +237,24 @@ direto — não delegar a checagem de uma suposição própria.
 | # | Item | Custo | Por quê nesta ordem |
 |---|---|---|---|
 | 1 | ~~`BURN_TICKS` (`+0xEA`)~~ | — | **refutado**; a saída do state 18 vira pergunta aberta, custo agora ALTO |
-| 2 | Velocidades de tombo | médio | governam a sensação de todo knockdown |
-| 3 | `mp_start` e regen de MP | baixo | um é F.LF, o outro é invenção pura sem fonte |
-| 4 | Anti-juggle `fall <= 40` | baixo | Nível C de uma fonte que já errou |
+| 2 | ~~Velocidades de tombo~~ | — | **fechado**, A14/A16 |
+| 3 | ~~`mp_start` e regen de MP~~ | — | **fechado**, A18 |
+| 4 | Anti-juggle `fall <= 40` | baixo | Nível C; A16 mostra que o anti-juggle real é outro |
 | 5 | `FRICTION`/`MIN_SPEED` | médio | afeta locomoção inteira |
 | 6 | `Z_MIN`/`Z_MAX` vs `bg.dat` | baixo | pode já estar certo; é só confirmar quem manda |
 | — | `engine_random` (item 10) | baixo p/ implementar | mas **antes** de qualquer comportamento ramificado, não depois |
+
+**O que entrou na fila, vindo de A14-A18** — não é superfície não verificada, é
+dívida de implementação com evidência pronta:
+
+| Item | Achado | Por que importa |
+|---|---|---|
+| Acumulador + commit dividido | A16 | é o mecanismo inteiro do empurrão; o porte não tem |
+| Hitstop `shaking` | A17 | congela o objeto e adia o empurrão; muda o timing de tudo |
+| `mp = 500` e regen por HP | A18 | um `movl` e cinco linhas; o de menor custo |
+| Impulso `-7.0` / `itr->dvy` | A14 | depende do acumulador estar em pé antes |
+| Frame 180 vs 186 por direção | A15 | barato depois de A9, é o mesmo padrão |
+| `+0x340` como divisor de dano | A19 | campo novo, semântica ainda não revertida |
 
 Nada disso é bug conhecido. É **superfície não verificada** — que, pela taxa-base
 acima, é onde os próximos bugs estão.

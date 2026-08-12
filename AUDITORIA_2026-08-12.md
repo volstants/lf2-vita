@@ -251,11 +251,12 @@ O porte não possui hitstop nenhum.
 
 ### Conclusão
 
-**Não foi possível comprovar** o efeito. O valor é gravado e decai, mas não
-reconstruí o consumidor — o sinal oposto (atacante positivo, vítima negativo)
-sugere semânticas diferentes para os dois lados, provavelmente pausa de
-animação de um e tremor lateral do outro. Implementar sem isolar o consumidor
-seria adivinhar. Fica registrado com os endereços para a próxima sessão.
+~~**Não foi possível comprovar** o efeito.~~ **SUPERADO POR A17.** Os três
+consumidores foram isolados: `FUN_0040e490` congela a atualização inteira do
+objeto, `FUN_004196f0` adia o commit do empurrão, e `0x0040de38` desloca o
+desenho só quando o valor é negativo. A leitura original — "pausa de animação
+de um e tremor lateral do outro" — estava certa no palpite e continua não sendo
+evidência; o que vale é A17, que tem endereço para cada elo.
 
 ---
 
@@ -458,6 +459,463 @@ o porte já executa.
 
 ---
 
+---
+
+## A14 — O tombo NÃO carrega velocidade nenhuma em `y_velocity`; ele acumula em `+0x30`, e o valor padrão é **7.0 para cima**
+
+**Severidade:** Fidelidade · Observável
+
+### Comportamento do engine
+
+`FUN_0042e100`, bloco `0x0042f183`-`0x0042f21b`. O bloco inteiro está sob a
+guarda de que a vítima **vai tombar**:
+
+```
+42f183:  mov  0x194(%esi,%edi,4),%eax   ; vítima
+42f18a:  cmpl $0x50,0xb0(%eax)          ; fall == 80 ?
+42f191:  jne  0x42f2a7                  ; não tomba → nada disto acontece
+```
+
+`80` é o marcador de tombo estabelecido em A8. Só quando `fall` foi reescrito
+para 80 é que existe impulso vertical.
+
+Leitura do `dvy` do `itr` e ramificação:
+
+```
+42f197:  mov  0xc(%esp),%edx            ; ponteiro do itr
+42f19b:  mov  0x18(%edx),%ecx           ; itr->dvy      (itr+0x18)
+42f1a0:  mov  0x368(%eax),%eax          ; vítima->file
+42f1a6:  mov  0x6f8(%eax),%eax          ; file->type
+42f1ac:  mov  %ecx,0x18(%esp)
+42f1b0:  je   0x42f1fb                  ; dvy == 0 → ramo B
+```
+
+**Ramo A — o `itr` declara `dvy`:**
+
+```
+42f1b2:  cmp  $0x2,%eax ; je 0x42f1bc   ; type 2 (arma pesada)
+42f1b7:  cmp  $0x3,%eax ; jne 0x42f1c2  ; type 3 (objeto de efeito)
+42f1bc:  cmpl $0x28,0x1c(%edx)          ; itr->fall <= 40 ?
+42f1c0:  jle  0x42f1d3                  ;   → não aplica impulso
+42f1c2:  fildl 0x18(%esp)               ; (double)itr->dvy
+42f1cd:  faddl 0x30(%eax)
+42f1d0:  fstpl 0x30(%eax)               ; vítima->+0x30 += itr->dvy
+```
+
+Trava contra atravessar o chão, **só no ramo A**:
+
+```
+42f1da:  fildl 0x14(%eax)               ; (double) y inteiro da vítima
+42f1dd:  faddl 0x30(%eax)
+42f1e0:  call 0x4450d0                  ; _ftol2_sse (cvttsd2si)
+42f1e7:  jle  0x42f21e                  ; resultado <= 0 → segue
+42f1f0:  fldl 0x448338                  ; 12.0
+42f1f6:  fstpl 0x30(%ecx)               ; vítima->+0x30 = 12.0
+```
+
+**Ramo B — o `itr` não declara `dvy` (`dvy == 0`):**
+
+```
+42f1fb:  cmp  $0x2,%eax ; je 0x42f205
+42f200:  cmp  $0x3,%eax ; jne 0x42f20b
+42f205:  cmpl $0x28,0x1c(%edx)          ; itr->fall <= 40 ?
+42f209:  jle  0x42f21e                  ;   → não aplica impulso
+42f20b:  mov  0x194(%esi,%edi,4),%eax
+42f212:  fldl 0x30(%eax)
+42f215:  fsubl 0x447a50                 ; 7.0
+42f21b:  fstpl 0x30(%eax)               ; vítima->+0x30 -= 7.0
+```
+
+`0x00447a50` contém `7.0` (double, conferido byte a byte).
+
+**Convenção de sinal, provada:** a gravidade é somada em `+0x48`
+(`0x0040e788`-`0x0040e791`: `fldl 0x48(%esi); faddl 0x448348 (=1.7); fstpl
+0x48(%esi)`) e a posição integra `y_position += y_velocity`
+(`0x0040e6c2`-`0x0040e6c8`). Logo **`+y` aponta para BAIXO** e um lançamento
+para cima é **negativo**. `-7.0` é impulso para cima.
+
+**Exceção com endereço:** se a vítima é `file->type` 2 (arma pesada) ou 3
+(objeto de efeito) **e** `itr->fall <= 40`, não há impulso vertical nenhum —
+nem o padrão nem o do `itr`.
+
+### Divergência encontrada
+
+O porte usa `launch(-8.f)` e `vy = -6.f`, ambos inventados. Nenhum dos dois
+existe: o padrão é **7.0**, e ele não é uma constante de lançamento fixa — é o
+fallback de quando o `itr` não traz `dvy`. Quando traz, o engine soma
+`itr->dvy` (campo que o porte já parseia e nunca leu neste caminho).
+
+A coincidência com `-8.0` em `0x448340` continua sendo coincidência: aquele
+valor é limiar de seleção dos frames 180-183 em `0x0040e7c1`, confirmado nesta
+sessão.
+
+### Evidência
+
+Nível A. `0x0042f183`-`0x0042f21b`; constante `7.0` em `0x00447a50`, `12.0` em
+`0x00448338`; sinal de `y` por `0x0040e6c2`/`0x0040e788`; `_ftol2_sse` em
+`0x004450d0` (`cvttsd2si`).
+
+### Conclusão
+
+**Divergente do LF2 original.**
+
+---
+
+## A15 — Frame de queda 180 vs 186 é escolhido pelo SINAL do empurrão horizontal contra o facing
+
+**Severidade:** Fidelidade · Observável
+
+### Comportamento do engine
+
+Imediatamente depois de A14, ainda dentro da guarda `fall == 80`
+(`0x0042f21e`-`0x0042f258`):
+
+```
+42f21e:  mov  0x194(%esi,%edi,4),%ecx
+42f225:  mov  0x80(%ecx),%dl            ; facing da vítima
+42f22b:  test %dl,%dl ; jne 0x42f239
+42f22f:  fcoml 0x28(%ecx)               ; 0.0  vs  +0x28
+42f234:  test $0x1,%ah                  ; C0
+42f237:  je   0x42f248                  ; → frame 180
+42f239:  cmp  $0x1,%dl ; jne 0x42f251    ; facing != 0 e != 1 → frame 186
+42f23e:  fcoml 0x28(%ecx)
+42f243:  test $0x41,%ah                 ; C0|C3
+42f246:  jp   0x42f251                  ; → frame 186
+42f248:  movl $0xb4,0x70(%ecx)          ; frame 180
+42f251:  movl $0xba,0x70(%ecx)          ; frame 186
+```
+
+`ST(0)` é `0.0` — a rotina mantém um zero no topo da pilha x87 e o restaura
+depois de cada chamada (`d9 ee fldz` em `0x0042ec9a`, `0x0042ecef`,
+`0x0042f054`, `0x0042f4ab`, `0x0042f4d8`, entre outros). A estrutura das duas
+comparações — `C0` isolado num ramo, `C0|C3` no outro — é o idioma do MSVC para
+`0.0 < v` e `0.0 >= v`.
+
+Resultado: **facing 0 com empurrão `<= 0`, ou facing 1 com empurrão `>= 0`, dá
+frame 180 (`0xb4`); o oposto dá frame 186 (`0xba`)**. Isto é, cair para trás dá
+180 e cair para a frente dá 186. O eixo é direção, não intensidade — o mesmo
+padrão que A9 estabeleceu para 222/224.
+
+### Divergência encontrada
+
+O porte tem um único frame de queda escolhido por `vy` (180-183, achado
+anterior) e não distingue 180 de 186 por direção.
+
+### Evidência
+
+Nível A. `0x0042f21e`-`0x0042f258`.
+
+### Conclusão
+
+**Divergente do LF2 original.**
+
+---
+
+## A16 — O empurrão não é aplicado no acerto: existe um PASSO DE COMMIT que divide pelo número de golpes do tick
+
+**Severidade:** Fidelidade · Observável · **este é o achado central da sessão**
+
+### Comportamento do engine
+
+O `object_t` tem **duas** trincas de `double` para velocidade, e elas são
+distintas:
+
+| Offsets | Papel |
+|---|---|
+| `+0x28` / `+0x30` / `+0x38` | **acumulador de empurrão** (x, y, z) |
+| `+0x40` / `+0x48` / `+0x50` | **velocidade efetiva** (x, y, z) |
+| `+0x58` / `+0x60` / `+0x68` | posição (x, y, z) |
+
+Prova estrutural, no construtor `FUN_004061d0`
+(`0x004061da`-`0x0040621c`): as **seis** primeiras são inicializadas com o mesmo
+valor (`0x447920` = `0.1`), na ordem `+0x50, +0x48, +0x40, +0x38, +0x30, +0x28`,
+e só depois as três de posição recebem `0.0`. Prova funcional, em
+`0x00430de6`-`0x00430e18`: um mesmo `ST(0)` é gravado nas seis, aos pares
+(`+0x30` e `+0x48`, depois `+0x28` e `+0x40`, depois `+0x38` e `+0x50`) — é o
+"zerar todas as velocidades".
+
+Só a velocidade efetiva move o objeto: `0x0040e51d` (`x += +0x40`),
+`0x0040e587` (`z += +0x50`), `0x0040e6c2` (`y += +0x48`), gravidade em `+0x48`.
+
+**`FUN_0042e100` escreve exclusivamente no acumulador.** `itr->dvx` vai para
+`+0x28` (`0x0042ee5b`, `0x0042ee6d`, e mais nove sítios); `itr->dvy` e o padrão
+`-7.0` vão para `+0x30` (A14). Em toda a faixa `0x42e100`-`0x430400` há
+exatamente **duas** escritas em `+0x48`, e as duas são de arma ricocheteando
+(`0x0042e53d`, `0x0042f474`), nenhuma da vítima.
+
+Quem transforma acumulador em velocidade é `FUN_004196f0`
+(`0x004196f0`-`0x00419798`), um passo separado que varre os 400 slots. Chamado
+uma vez por tick em `0x0041f540`, **depois** do laço de colisão que chama
+`FUN_0042e100`:
+
+```
+4196f1:  fldl 0x4479e0            ; K = 2.0            (ST2 no laço)
+4196f8:  fldz                     ; 0.0                (ST1 no laço)
+419703:  cmpb $0x0,0x4(%ecx,%esi,1)  ; slot ativo?
+41970c:  cmpl $0x0,0xb4(%edx)     ; shaking != 0 → PULA o slot inteiro
+419715:  cmpl $0x0,0x20(%edx)     ; attacks == 0 → só zera os acumuladores
+41971b:  mov  0x20(%edx),%edi     ; attacks
+41971e:  fldl 0x28(%edx)
+419721:  fmul %st(2),%st          ; * 2.0
+41972a:  fildl 0x8(%esp)          ; (double)(attacks + 1)
+41972e:  fdivrp %st,%st(1)
+419730:  fstpl 0x40(%edx)         ; x_velocity = (+0x28 * 2) / (attacks+1)
+419735..41974a: idem para  +0x30 → 0x48
+41974f..419764: idem para  +0x38 → 0x50
+419769:  movl $0x0,0x20(%edx)     ; attacks = 0
+419772:  fstl 0x28(%edx)          ; acumuladores = 0.0
+419777:  fstl 0x30(%edx)
+41977c:  fstl 0x38(%edx)
+```
+
+`0x004479e0` contém `2.0`, conferido byte a byte.
+
+`+0x20` (`attacks` no `object.h` do OpenLF2) é **o número de `itr` que
+acertaram este objeto neste tick** — incrementado na vítima em `0x0042ea88` e
+`0x0043009b`, zerado aqui.
+
+**A aritmética fecha o caso do golpe único.** Com `attacks == 1`:
+`v = acumulado × 2 / 2 = acumulado`. Um único golpe entrega exatamente o que o
+`itr` pediu. Com dois `itr` simultâneos: `(a₁+a₂) × 2 / 3` — a soma dos dois é
+amortecida, não somada crua. É um anti-juggle **de tick**, embutido na
+aritmética, que o porte não tem em forma nenhuma.
+
+### Consequência para A14
+
+Um tombo causado por um único `itr` sem `dvy` entrega
+`y_velocity = -7.0 × 2 / 2 = -7.0`. **`-7.0` é o número que o porte deveria
+usar para o caso simples** — mas só o caso simples. Com dois golpes no mesmo
+tick, não é.
+
+### Divergência encontrada
+
+O porte aplica o empurrão direto na velocidade, no instante do acerto, sem
+acumulador, sem contador de golpes por tick e sem passo de commit.
+
+### Evidência
+
+Nível A. Construtor `0x004061d0`; pareamento em `0x00430de6`-`0x00430e18`;
+integração em `0x0040e51d`/`0x0040e587`/`0x0040e6c2`; acumulação em
+`0x0042ee5b` e `0x0042f1cd`/`0x0042f21b`; commit em `FUN_004196f0`
+(`0x004196f0`-`0x00419798`), chamado em `0x0041f540`; `K = 2.0` em `0x004479e0`.
+Inventário exaustivo de `+0x30` no `.text`: 5 escritas e 5 leituras, todas
+mapeadas — nenhuma outra rota do acumulador para a velocidade existe.
+
+### Conclusão
+
+**Divergente do LF2 original.**
+
+---
+
+## A17 — `shaking` é hitstop de verdade: congela o objeto inteiro e ADIA o empurrão · **fecha A12**
+
+**Severidade:** Fidelidade · Observável
+
+### Comportamento do engine
+
+A12 registrou as escritas (`atacante = +3`, `vítima = -5` em
+`0x004300a6`/`0x004300b7`; há um segundo par `+3`/`-3` em
+`0x0042f2b7`/`0x0042f2cc`, e `+2`/`-3` em `0x00418986`/`0x00418997`) e concluiu
+"não foi possível comprovar o efeito". Os três consumidores estão isolados
+agora.
+
+**1. Congela a atualização por tick.** `FUN_0040e490` é a primeira coisa que
+roda para o objeto, e é uma cancela:
+
+```
+40e490:  push %ecx ; push %esi ; mov %ecx,%esi
+40e494:  mov  0xb4(%esi),%eax
+40e49a:  test %eax,%eax
+40e49c:  je   0x40e4c3            ; shaking == 0 → segue a atualização inteira
+40e49e:  jle  0x40e4a9
+40e4a0:  add  $0xffffffff,%eax
+40e4a3:  mov  %eax,0xb4(%esi)     ; shaking > 0 → -1
+40e4a9:  mov  0xb4(%esi),%eax
+40e4b1:  jge  0x40ef68
+40e4b7:  add  $0x1,%eax
+40e4ba:  mov  %eax,0xb4(%esi)     ; shaking < 0 → +1
+40e4c0:  pop ; pop ; ret          ; e RETORNA — nada mais acontece neste tick
+```
+
+Enquanto `shaking != 0`, o objeto não anda, não cai, não avança frame e não
+decai `fall`/`bdefend`. O contador anda 1 por tick **em direção a zero, dos dois
+lados** — o sinal não altera a duração.
+
+Há uma segunda cancela equivalente em `0x0040d966`, que deixa passar apenas
+`file->type == 3`.
+
+**2. Adia o commit do empurrão.** `FUN_004196f0` (A16) pula o slot inteiro
+quando `shaking != 0` (`0x0041970c`) — não aplica **e não zera** os
+acumuladores. Eles ficam guardados até o hitstop acabar.
+
+**3. O sinal é de DESENHO.** Em `0x0040de38`:
+
+```
+40de38:  cmp  %ebp,0xb4(%esi)     ; ebp = 0
+40de43:  jge  0x40de54            ; shaking >= 0 → sem deslocamento
+40de45:  mov  0x20(%esp),%eax
+40de49:  lea  (%eax,%eax,2),%ebp
+40de4c:  lea  -0x3(%ebp,%ebp,1),%ebp   ; deslocamento = 6*n - 3
+40de50:  mov  %ebp,0x10(%esp)
+```
+
+Só `shaking < 0` recebe deslocamento lateral. É isso que separa atacante de
+vítima: **os dois congelam, só a vítima treme.**
+
+### O encadeamento completo, com endereço em cada elo
+
+1. `FUN_0042e100` acumula o empurrão em `+0x28`/`+0x30` e grava
+   `vítima->shaking = -5`, `atacante->shaking = +3`.
+2. No mesmo tick, `FUN_004196f0` vê `shaking != 0` e **não** aplica.
+3. Nos ticks seguintes, `FUN_0040e490` congela os dois e anda o contador.
+4. Quando `shaking` chega a zero, `FUN_004196f0` aplica o empurrão acumulado e
+   o objeto sai voando.
+
+O impacto é visível: o golpe conecta, ambos param, e só depois a vítima é
+arremessada.
+
+### Divergência encontrada
+
+O porte não tem hitstop nenhum. Não é só um efeito visual ausente: sem a
+cancela, o empurrão sai no tick do acerto em vez de sair depois, e o `fall`
+decai durante o congelamento que não existe.
+
+### Evidência
+
+Nível A. `FUN_0040e490` (`0x0040e490`-`0x0040e4c2`), `0x0040d966`,
+`0x0041970c`, `0x0040de38`-`0x0040de50`. Escritas em `0x004300a6`/`0x004300b7`,
+`0x0042f2b7`/`0x0042f2cc`, `0x00418986`/`0x00418997`.
+
+### Conclusão
+
+**Divergente do LF2 original.** A12 sai de "não foi possível comprovar" para
+comprovado.
+
+---
+
+## A18 — `mp` começa em **500**, e a regeneração depende do HP que falta
+
+**Severidade:** Fidelidade · Observável
+
+### Comportamento do engine
+
+**Campo.** `mp` é `+0x308`, não `+0x300`. A separação sai da inicialização
+(`0x004063ca`-`0x004063e1`), onde quatro campos recebem `0x1f4` = **500** de uma
+só vez:
+
+```
+4063ca:  mov  $0x1f4,%ecx
+4063cf:  mov  %ecx,0x2fc(%esi)    ; hp
+4063d5:  mov  %ecx,0x304(%esi)    ; hp máximo
+4063db:  mov  %ecx,0x300(%esi)    ; teto recuperável ("barra escura")
+4063e1:  mov  %ecx,0x308(%esi)    ; mp
+```
+
+Que `+0x300` é o teto recuperável e não o `mp` se prova duas vezes: em
+`0x0042e97d` ele recebe `-dano/3` a cada golpe (`imul $0x55555555` + `sar`), e
+em `0x00418109`-`0x0041813e` a ordem `hp <= +0x300 <= +0x304` é imposta por
+duas travas seguidas. Que `+0x308` é o `mp` se prova pelos custos de especial
+lidos na rotina de decisão (`0x00403aa2` em diante: 350, 250, 100, 170, 220,
+150, 200, 450, 70, 320, 120, 500 — a tabela de `mp:` do LF2).
+
+**Regeneração** (`0x0041fa90`-`0x0041faf2`), uma vez por tick por objeto:
+
+```
+41fa90:  cmpl $0x1f4,0x308(%ecx)  ; mp >= 500 → não regenera
+41fa9c:  cmpl $0x0,0x450bd4       ; flag global tem de ser 0
+41faa5:  cmpl $0x0,0x8(%ecx)      ; +0x8 >= 0
+41faab:  mov  0x2fc(%ecx),%eax    ; hp
+41fab1:  cmp  $0x1f4,%eax ; jle   ; hp = min(hp, 500)
+41fac3:  mov  0x6f4(%edx),%edx    ; file->id
+41fac9:  cmp  $0x33,%edx ; je     ; id 51
+41face:  cmp  $0x34,%edx ; jne    ; id 52
+41fad3:  cltd ; sub %edx,%eax ; sar $1,%eax   ; para 51/52: hp /= 2
+41fad8:  mov  $0x1f4,%edx
+41fadd:  sub  %eax,%edx           ; t = 500 - hp
+41fadf:  mov  $0x51eb851f,%eax
+41fae4:  imul %edx ; sar $0x5,%edx            ; t / 100
+41faee:  lea  0x1(%edx,%eax,1),%edx           ; t/100 + 1
+41faf2:  add  %edx,0x308(%ecx)    ; mp += t/100 + 1
+```
+
+Ou seja: **`mp += (500 − min(hp,500)) / 100 + 1` por tick.** Com HP cheio é `+1`
+por tick; com HP zerado é `+6` por tick. Os dados de `id` 51 e 52 têm o `hp`
+dividido por 2 antes da conta, o que dobra o degrau — regeneram mais rápido em
+qualquer HP.
+
+Não há trava depois da soma: a trava é só na entrada (`mp >= 500` não
+regenera), então o `mp` pode ultrapassar 500 em até 5 pontos no último tick.
+
+### Divergência encontrada
+
+Duas, ambas de origem conhecida:
+
+- `mp = 200` no início (`fighter.hpp:177`, do F.LF `global.js: mp_start`) —
+  **errado**, é 500.
+- regeneração de `1 a cada 2 ticks` (`player.hpp::tickInner`,
+  `(++mpRegenAcc & 1) == 0`, invenção pura sem fonte) — **errado**. O engine
+  regenera todo tick, e a taxa cresce com o dano sofrido. No pior caso o porte
+  está 12× lento (0,5/tick contra 6/tick).
+
+### Evidência
+
+Nível A. Inicialização `0x004063ca`-`0x004063e1`; regeneração
+`0x0041fa90`-`0x0041faf2`; separação `+0x300`/`+0x304`/`+0x308` por
+`0x0042e97d` e `0x00418109`-`0x0041813e`; custos de especial a partir de
+`0x00403aa2`.
+
+### Conclusão
+
+**Divergente do LF2 original.** Sai a taxa-base de 9/9 e entra 11/11.
+
+---
+
+## A19 — Campos confirmados no disassembly (fecha parte do item 2 do plano)
+
+**Severidade:** Método · não é achado de comportamento
+
+Os candidatos do `struct_harvest.py` que esta sessão confirmou com base
+identificada. Cada linha tem endereço; nenhuma vem da saída do script.
+
+| Offset | O que é | Onde se prova |
+|---|---|---|
+| `+0x194` | array de **400 ponteiros** de objeto, no gerenciador (`this`), não no `object_t` | `0x0042e110` e 264 outros; laços com `cmp $0x190` em `0x0041f2a4`, `0x00419785` |
+| `+0x20` | golpes recebidos **neste tick**; divisor do commit; zerado em `0x00419769` | `0x0042ea88`, `0x0043009b`, `0x0041971b` |
+| `+0x28`/`+0x30`/`+0x38` | acumulador de empurrão x/y/z (**não** `pic_x_gain`/`y_accl`/`z_accl`) | A16 |
+| `+0x2FC` | `hp` | `0x004063cf` |
+| `+0x300` | teto recuperável; cai `dano/3` por golpe | `0x0042e97d`, `0x00418109` |
+| `+0x304` | `hp` máximo | `0x004063d5`, `0x0041810f` |
+| `+0x308` | `mp` | A18 |
+| `+0x340` | divisor de dano: `dano = injury*100 / +0x340` quando `> 0` | `0x0042e8c6`-`0x0042e8e5` |
+| `+0x344` | índice 1-2 usado no placar global `0x00451b60` | `0x0042e932`-`0x0042e94e` |
+| `+0x348` | dano creditado ao dono | `0x0042e9c3` |
+| `+0x34C` | dano sofrido, acumulado | `0x0042e98a` |
+| `+0x354` | **slot do dono a creditar**; default `99` no construtor | `0x0042e913`, `0x0042e9b6`, `0x004063c0` |
+| `+0x358` | abates creditados ao dono | `0x0042e925` |
+| `+0xB4` | `shaking` | A17 |
+
+### Armadilha que precisa ficar registrada
+
+**O `object_t` e o struct do `.dat` de personagem têm offsets que colidem na
+mesma faixa, e os dois guardam `double`.** A rotina de dump em
+`0x0040d185`-`0x0040d22a` imprime o struct do `.dat` campo a campo com o nome
+literal, e ela diz:
+
+| Offset | Campo do `.dat` |
+|---|---|
+| `+0x20` | `running_speed` |
+| `+0x28` | `running_speedz` |
+| `+0x30` | `heavy_walking_speed` |
+| `+0x38` | `heavy_walking_speedz` |
+| `+0x40` | `heavy_running_speed` |
+| `+0x48` | `heavy_running_speedz` |
+
+Isto é, `fldl 0x30(%ecx)` pode ser `heavy_walking_speed` **ou** o acumulador de
+empurrão, dependendo de quem é `%ecx` — e as duas leituras em `0x00413838` e
+`0x004138c6` são do `.dat`, não do objeto. O `struct_harvest.py` não distingue
+os dois, e esta é a segunda vez que a ressalva de Nível D dele impede um erro.
+Vale acrescentar a tabela acima ao cabeçalho do script.
+
 # IMPLEMENTAÇÃO DO PORTE
 
 *Histórico. Não é evidência de fidelidade.*
@@ -472,7 +930,9 @@ o porte já executa.
   `bdefend` (incluindo pelo `weapon_strength_list`).
 - Decaimento de `fall` e `bdefend` em `tickInner`: 1 por tick.
 
-**Não implementado:** A12 (`shaking`).
+**Não implementado:** A12/A17 (`shaking`), A14, A15, A16, A18 — todos abertos
+para a próxima sessão. Nenhuma linha de código do porte mudou em 2026-08-12
+depois de A13; os achados A14-A19 são de auditoria, não de implementação.
 
 ---
 

@@ -33,6 +33,35 @@ Consequencia pratica: **todo item da saida e' Nivel D ate' alguem abrir o
 disassembly e confirmar quem e' o base.** O script economiza a busca, nao a
 prova. Usar a saida como se fosse mapa de campos seria repetir exatamente o
 vicio que `AUDITORIA_SUPERFICIE.md` documenta.
+
+COLISAO CONHECIDA — object_t x struct do .dat de personagem (2026-08-12, A19)
+---------------------------------------------------------------------------
+Os dois guardam `double` na mesma faixa de offset. A rotina de dump em
+0x0040d185-0x0040d22a imprime o struct do .dat com o nome literal de cada campo:
+
+    +0x20 running_speed        +0x38 heavy_walking_speedz
+    +0x28 running_speedz       +0x40 heavy_running_speed
+    +0x30 heavy_walking_speed  +0x48 heavy_running_speedz
+
+No object_t esses mesmos offsets sao:
+
+    +0x28/+0x30/+0x38  acumulador de empurrao x/y/z  (A16)
+    +0x40/+0x48/+0x50  velocidade efetiva x/y/z
+
+Entao `fldl 0x30(%ecx)` pode ser qualquer um dos dois. As leituras em 0x00413838
+e 0x004138c6 sao do .dat; as de 0x0042f1cd e 0x0042f212 sao do objeto. O script
+nao distingue, e nunca vai distinguir.
+
+O QUE FECHOU O CASO EM A16, E QUE ESTE SCRIPT NAO FAZ
+-----------------------------------------------------
+A varredura ampla mostrou +0x30 como um candidato qualquer no meio da lista. O
+que provou a semantica foi o INVENTARIO EXAUSTIVO de um unico offset: as 10
+instrucoes do .text inteiro que tocam 0x30(%reg) com base != esp/ebp, escritas
+e leituras, todas mapeadas. A pergunta que rendeu foi "quem LE este campo?" —
+o bloco de tombo escrevia num campo que nada lia, e foi isso que obrigou a
+procurar o passo de commit.
+
+Modo sugerido e nao implementado: `--offset 0x30` sobre o .text inteiro.
 """
 import re, subprocess, sys, collections
 
