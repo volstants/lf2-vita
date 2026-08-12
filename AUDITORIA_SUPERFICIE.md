@@ -32,15 +32,51 @@ do binário deve ser presumido errado até prova em contrário**, e não o inver
 
 Ordenado por risco = (probabilidade de estar errado) × (impacto se estiver).
 
-### 1. `BURN_TICKS = 36` — duração da queimadura · **RISCO ALTO**
+### 1. `BURN_TICKS = 36` — **CANDIDATO `+0xEA` REFUTADO; questão maior em aberto**
 
-`player.hpp`. Atribuído ao F.LF ("locks frame 203 for 36 TU"). É o mesmo tipo de
-constante de tempo que o `0.45` do decaimento — e aquele estava errado.
+`player.hpp`. Atribuído ao F.LF ("locks frame 203 for 36 TU").
 
-O binário tem o cronômetro em algum lugar: o `fall`/`bdefend` decaem em
-`0x0040da15`-`0x0040da3a`, e logo abaixo há `0x0040da3b: mov 0xea(%esi),%al` com
-decremento de byte. `+0xEA` é candidato a contador de queimadura. **Não
-verificado.**
+**O candidato que este documento sugeriu estava errado.** Busca exaustiva das
+referências a `+0xEA` no `.text` — cinco, todas mapeadas:
+
+| Endereço | O que faz |
+|---|---|
+| `0x00406357` | `mov %bl,0xea(%esi)` — zero-init de construtor (`xor %ebx,%ebx` em `0x004061e0`) |
+| `0x0040da3b` / `0x0040da47` | leitura e decremento no laço de decaimento por tick |
+| `0x00413620` | `cmpb $0x0,0xea(%esi)` — teste |
+| `0x0043057a` | `movb $0x3,0xea(%edx)` — grava **3**, num ramo com discriminador `== 6` |
+
+Nenhuma escrita usa 36; o maior valor gravado é 3. `+0xEA` **não** é o
+cronômetro de queimadura.
+
+**Erro de método, e é o mesmo que este documento descreve.** Apontei `+0xEA`
+porque ele decai perto do `fall` e do `bdefend` — proximidade de vizinhança
+tratada como confirmação, exatamente o vício listado na seção "Erro de processo"
+abaixo. O item nasceu viciado.
+
+**O que a investigação seguinte revelou.** O sítio que acende a queimadura é
+`0x0042fd76`, e ele **não grava cronômetro nenhum**:
+
+```
+42fd69:  cmpl $0x0,0x6f8(%edx)   ; vítima é personagem?
+42fd76:  movl $0xcb,0x70(%eax)   ; frame_id = 203
+42fd84:  movl $0x0,0x88(%ecx)    ; frame_wait = 0
+42fd98:  push $0x10 ; call 0x417090   ; efeito/som, id 16
+42fda9:  fcoml 0x28(%ecx)        ; compara 0.0 com x_velocity
+42fdb6:  movb $0x1,0x80(%ecx)    ; …e ajusta o facing pela direção do empurrão
+```
+
+Frame, wait, som e facing. Nada de duração.
+
+Isso levanta uma hipótese mais forte que a original: **pode não existir contador
+de queimadura no engine.** A saída dos frames 203-206 seria estrutural — cadeia
+de frames mais algum outro mecanismo — e não uma contagem regressiva. Se for o
+caso, `BURN_TICKS = 36` não está "com valor errado": está modelando algo que o
+original não tem.
+
+**Estado:** o candidato está refutado com busca exaustiva. A pergunta de fundo —
+como o original sai do state 18 — segue **sem resposta** e não deve ser fechada
+por analogia.
 
 ### 2. `launch(-8.f)` e `vy = -6.f` — velocidade do tombo · **RISCO ALTO**
 
@@ -129,7 +165,7 @@ direto — não delegar a checagem de uma suposição própria.
 
 | # | Item | Custo | Por quê nesta ordem |
 |---|---|---|---|
-| 1 | `BURN_TICKS` (`+0xEA`) | baixo | candidato já localizado, mesma família dos que erraram |
+| 1 | ~~`BURN_TICKS` (`+0xEA`)~~ | — | **refutado**; a saída do state 18 vira pergunta aberta, custo agora ALTO |
 | 2 | Velocidades de tombo | médio | governam a sensação de todo knockdown |
 | 3 | `mp_start` e regen de MP | baixo | um é F.LF, o outro é invenção pura sem fonte |
 | 4 | Anti-juggle `fall <= 40` | baixo | Nível C de uma fonte que já errou |

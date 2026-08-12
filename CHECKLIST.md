@@ -1,13 +1,18 @@
 # LF2 Vita — Roadmap
 
-**Estado atual (v0.6):** build data-driven **rodando na Vita**. O player (Dennis) é
-interpretado a partir do `dennis.dat` real — locomoção, corrida (duplo-toque),
-pulo, dash, soco e reações de combate (stagger/knockdown/morte) vêm dos frames
-originais a 30 Hz. Renderer ainda é **SDL2**. Inimigos ainda usam a lógica
-**hardcoded** (`firen.hpp`) — próximo alvo de migração.
+**Estado atual (v0.8+, 2026-08-12):** build data-driven rodando na Vita. Player
+E inimigos interpretam `.dat` reais (`Enemy` = `Player` + IA). Combate completo:
+especiais, projéteis, armas, fogo/gelo, defesa por `bdefend`, falling points.
+Renderer ainda **SDL2**.
 
-Eixo geral: **interpretador** (feito) → **inimigos data-driven** → **conteúdo**
-(golpes especiais, projéteis, personagens) → **áudio** → **GXM** (performance).
+Eixo geral: interpretador (feito) → inimigos data-driven (feito) → conteúdo
+(feito) → **fidelidade contra o assembly** (em curso) → áudio → GXM.
+
+> **Este documento estava descrito na v0.6 até 2026-08-12** — dizia que os
+> inimigos eram hardcoded quando já eram data-driven havia versões. As seções 1,
+> 3 e 4 estavam integralmente feitas e marcadas como pendentes. Corrigido abaixo.
+> Deriva de checklist é risco real: uma sessão nova leria isto e "migraria" algo
+> já migrado.
 
 ---
 
@@ -27,17 +32,14 @@ Eixo geral: **interpretador** (feito) → **inimigos data-driven** → **conteú
 
 ---
 
-## 1. Migrar inimigos para o Fighter (próximo grande passo)
+## 1. ✅ Inimigos data-driven
 
-Hoje o Firen é `firen.hpp` hardcoded, folha única (`firen_0.png`), com frames de
-dano remendados (pics de tombo no lugar dos reais). Migrar pro `Player`/`Fighter`
-unifica tudo e destrava o roster.
-
-- [ ] Generalizar `Player` (ou extrair um `Actor` comum) que sirva de player E inimigo
-- [ ] Trocar `Enemy` por um `Fighter` lendo `firen.dat` real (com as folhas `firen_1/2` que faltam)
-- [ ] IA de perseguição operando sobre o `Fighter` (state/frames reais, não `St` fixo)
-- [ ] Colisão unificada: ambos os lados usando `forEachItr`/`forEachBdy` (fim das caixas `Box` legadas)
-- [ ] Remover `char.hpp`/`dennis.hpp`/`enemy.hpp`/`firen.hpp` órfãos
+- [x] `Enemy` é `Player` + IA, lendo o `.dat` real do personagem
+- [x] IA de perseguição operando sobre states/frames reais
+- [x] Colisão unificada: os dois lados por `forEachItr`/`forEachBdy`
+- [x] `char.hpp` removido
+- [ ] Apagar `dennis.hpp` e `firen.hpp` — código morto, incluídos por ninguém
+      (confirmado 2026-08-12: nenhum `#include` em `src/`)
 
 ## 2. ✅ Ícone e LiveArea custom
 
@@ -46,19 +48,24 @@ unifica tudo e destrava o roster.
 - [x] `FILE sce_sys/...` reativados no `CMakeLists`
 - [ ] (futuro) Arte definitiva — manter sempre em 8-bit palette
 
-## 3. Profundidade de combate
+## 3. ✅ Profundidade de combate
 
-- [ ] Combos (`hit_a` encadeado: punch → punch2) e janelas de timing
-- [ ] Golpes especiais via `hit_Fa`/`Ua`/`Da`/`Fj`/… (o `tryInput` do Fighter já existe, falta fiar)
-- [ ] Defesa por input (segurar guarda → state 7; quebra → 8) e `bdefend` (dano na guarda)
-- [ ] Contador de queda (`fall`) definindo stagger vs knockdown de verdade (hoje é limiar de dano)
-- [ ] `arest`/`vrest` (stunlock), agarrão (`cpoint`) com o lixo `0xCDCDCDCD` tratado
+- [x] Combos (`hit_a` encadeado: punch → punch2)
+- [x] Golpes especiais via `hit_Fa`/`Ua`/`Da`/`Fj` (Quadrado + comando fiel)
+- [x] Defesa por input; `bdefend` acumulado com quebra acima de 30 e dano `injury/10`
+      — **do assembly** (`0x43008e`, `0x42ff6a`), não do F.LF
+- [x] Contador `fall` com saturação no piso da faixa (`0x42eb6c`) e frames de
+      reação 220/222/224/226 escolhidos por faixa e por facing
+- [x] `arest` escalar + `vrest` por par (`0x42f2c8`)
+- [ ] Agarrão (`cpoint`) — único item de combate ainda ausente
+- [ ] Hitstop (`shaking`, `+0xB4`) — localizado, consumidor não isolado (A12)
 
-## 4. Objetos e projéteis
+## 4. ✅ Objetos e projéteis
 
-- [ ] Spawn via `opoint` → `oid` → arquivo (o `dat::Index` do `data.txt` já resolve isso)
-- [ ] Objetos type 3 (bolas de fogo/chasers), type 1/2 (armas leves/pesadas)
-- [ ] Empacotar os `.dat` de objeto (`dennis_ball.dat` etc.) e suas folhas no VPK
+- [x] Spawn via `opoint` → `oid` → arquivo, com `facing = qtd*10 + dir`
+- [x] Objetos type 3 (bolas/chasers), type 1/2 (armas leves/pesadas)
+- [x] `.dat` de objeto e folhas no VPK; pool fixo sem alocação no loop
+- [x] Estados de voo: 3000 se gasta ao acertar, 3005/3006/18 atravessam (`0x430536`)
 
 ## 5. Áudio e polish
 
