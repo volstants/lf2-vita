@@ -41,3 +41,9 @@ lf2vita.log
 # Sprites do LF2 original — copyright Marti/Starsky Wong
 assets/
 !sce_sys/**/*.png
+
+# ghidra-ai-bridge (regeraveis)
+.ghidra-exports/
+reference/ghidra/
+.venv/
+ghidra-bridge.yaml.bak

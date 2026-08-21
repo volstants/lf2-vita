@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <string>
 #include <vector>
 #include <deque>
@@ -16,6 +17,7 @@
 #include "engine/dat.hpp"
 #include "engine/fighter.hpp"
 #include "engine/object.hpp"
+#include "engine/random.hpp"
 #include "characters/player.hpp"
 #include "characters/enemy.hpp"
 
@@ -562,6 +564,17 @@ static void damageObjects(const HitInfo& hi, bool fromRight, int skipIdx,
         // arest em 0x0042f2f7 e' incondicional quanto ao tipo da vitima: socar
         // uma pedra consome o arest do atacante no original.
         applyRest(hi, attackerArest, o.rehit);
+
+        // lf2.exe FUN_0042e100: ao acertar um objeto NAO-personagem, o original
+        // sorteia o frame da vitima. Dois dos sete sitios tem contrapartida aqui:
+        //   0x0042f4d3  file->type 1 (arma leve)   -> engine_random(16)
+        //   0x0042f65a  file->type 2 (arma pesada) -> engine_random(6)
+        // Faixa [0,n): o valor vai direto para frame_id (+0x70).
+        // Os outros cinco sitios ainda nao existem no porte — ver
+        // AUDITORIA_2026-08-20.md A20. Enquanto faltarem, a CONTAGEM de chamadas
+        // diverge do original de proposito, e o traco diferencial vai acusar.
+        o.f.setFrame(lf2::engineRand(o.weaponType >= 2 ? 6 : 16));
+
         if (!o.takeHit(hi.injury, fromRight)) continue;
         // Broke: swap it for the shatter effect at the same spot.
         float bx = o.f.x, by = o.f.y, bz = o.f.z;
@@ -755,6 +768,23 @@ static int fighterWpoint(const lf2::Fighter& f, dat::Wpoint& out) {
 //  main
 // ─────────────────────────────────────────────────────────────────────────────
 int main(int argc, char* argv[]) {
+    // ── RNG do engine ────────────────────────────────────────────────────────
+    // lf2.exe FUN_00422ac0 enche a tabela de 3000 bytes com rand()%255+1, e o
+    // 0x0043cf40 semeia com srand(timeGetTime()). Ver A25/A26.
+    //
+    // MEDIDO (2026-08-20, probe_rng_table.py, 6 leituras no MESMO pid 28408,
+    // atravessando morte e recomeco): os bytes da tabela nao mudaram uma vez,
+    // enquanto os cursores andaram milhares de posicoes. A tabela e' de BOOT,
+    // nao de partida — a hipotese anterior caiu, e por isso o fill esta' aqui
+    // e nao no resetGame().
+    //
+    // Que a semente venha do relogio nao e' descuido: e' o que o original faz,
+    // e nem ele reproduz a propria sequencia entre execucoes. Para traco
+    // diferencial, capture a tabela do processo vivo e injete com loadTable().
+    std::srand(static_cast<unsigned>(std::time(nullptr)));
+    lf2::engineRandom().reset();
+    lf2::engineRandom().fillFromRand([] { return std::rand(); });
+
 #ifdef LF2_HEADLESS
     // ./bin/lf2-headless [ticks]  — default 60 s of simulated play.
     if (argc > 1) g_headlessTicks = std::atol(argv[1]);

@@ -1,0 +1,18 @@
+# Gerado por tools/setup_ghidra_bridge.ps1 - reescrito a cada execucao.
+# Este arquivo E' versionavel. O .ghidra-exports/ e o reference/ghidra/ nao.
+ghidra:
+  install_dir: C:/Ghidra/ghidra_12.1.3_PUBLIC
+  project_dir: C:/Users/rodrigo.chiesa/Documents/LittleFighter2Vita/reference/ghidra
+  project_name: lf2
+  program_name: lf2.exe
+
+paths:
+  export_dir: .ghidra-exports
+  address_map: .ghidra-exports/address_map.json
+
+source:
+  root: ./src
+
+binary:
+  code_range_min: 0x00401000
+  code_range_max: 0x00500000
