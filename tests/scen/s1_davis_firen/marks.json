@@ -1,0 +1,49 @@
+{
+ "frames": 3409,
+ "marks": [
+  [
+   676,
+   "davis_D>A_energy_blast"
+  ],
+  [
+   814,
+   "davis_DvA_many_punch"
+  ],
+  [
+   972,
+   "davis_D^A_dragon_punch_launch"
+  ],
+  [
+   1511,
+   "davis_jabs_dizzy_super_punch"
+  ],
+  [
+   1719,
+   "davis_jump_attack"
+  ],
+  [
+   2243,
+   "davis_run_attack"
+  ],
+  [
+   2403,
+   "davis_dash_attack"
+  ],
+  [
+   2574,
+   "firen_D>A_fireball_burn"
+  ],
+  [
+   2726,
+   "firen_D>J_burn_run"
+  ],
+  [
+   3014,
+   "firen_DvJ_flame"
+  ],
+  [
+   3268,
+   "firen_D^J_explosion"
+  ]
+ ]
+}

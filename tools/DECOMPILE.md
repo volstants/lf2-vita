@@ -1,91 +1,77 @@
-# Decompilar o LF2 original (Ghidra headless)
+# Auditar e extrair o LF2 com Ghidra
 
-> ## ⚠ O que sai daqui é ÍNDICE, não fonte
->
-> A frase original deste arquivo dizia que o objetivo era consultar a mecânica
-> **"na fonte"**. Isso está errado e foi corrigido em 2026-08-12.
->
-> O `lf2_decomp.c` é **Nível B**. Serve para localizar a região e formar
-> hipótese; a afirmação sai do **assembly** (`objdump`, Nível A). Dois motivos
-> medidos, não opinião:
->
-> - **187 dos 481 `FUN_` do arquivo gerado não são entrada de função** — são
->   stubs `int3`, padding de hot-patch do MSVC, ou endereços saltados por um
->   `jmp` anterior. Rode `tools/fn_boundary_check.py` antes de citar qualquer
->   pseudocódigo.
-> - O melhor decompilador assistido publicado hoje atinge **64,9%** de
->   re-executabilidade em funções C de biblioteca padrão compiladas com gcc. Um
->   terço sai errado no caso mais fácil possível; o nosso é MSVC 8.0 com FPO.
->
-> Ver `BINARY_NOTES.md` para as receitas de leitura direta do binário.
+Procedimento revisado em 2026-09-20. Resultado executado e evidencias:
+`AUDITORIA_2026-09-20_GHIDRA.md`.
 
-Objetivo: ter um índice navegável do `lf2.exe` para localizar rotinas, em vez de
-inferir dos `.dat` ou confiar em reimplementações (F.LF / OpenLF2).
+O pseudocodigo e uma interpretacao. O assembly e os bytes do executavel
+continuam sendo a referencia. Sucesso da decompilacao nao prova equivalencia
+semantica, tipos corretos ou recuperacao do codigo-fonte original.
 
-## 1. Instalar (no WSL Ubuntu)
+## Ambiente validado
 
-```bash
-sudo apt update && sudo apt install -y openjdk-21-jdk unzip wget
-cd ~ && wget https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.3.1_build/ghidra_11.3.1_PUBLIC_20250219.zip
-unzip -q ghidra_11.3.1_PUBLIC*.zip && mv ghidra_11.3.1_PUBLIC ~/ghidra
-```
-(Se a URL falhar, pegue o .zip mais recente em github.com/NationalSecurityAgency/ghidra/releases)
+- Executavel: `reference/decomp/lf2.exe`, LF2 v2.0a, SHA256
+  `12dfa00f6b767508612550e9ab27ab74b4201ff4cb9ff31d068925924eab8fc5`.
+- Ghidra instalado: `C:/Ghidra/ghidra_12.1.3_PUBLIC`.
+- Projeto existente: `reference/ghidra/lf2.gpr`, programa `/lf2.exe`.
+- JDK: `C:/Program Files/Microsoft/jdk-21.0.12.8-hotspot`.
+- Python: `.venv/Scripts/python.exe`, com PyGhidra, pefile 2024.8.26 e
+  capstone 5.0.9. Os dois ultimos foram instalados nessa venv na auditoria.
 
-## 2. Rodar (leva ~10-40 min; usa bastante RAM)
+## Procedimento reproduzivel, em PowerShell
 
-Instalação do LF2 neste PC: `C:\Program Files (x86)\LittleFighter`
+Execute na raiz do repositorio, com o projeto Ghidra fechado para obter uma
+copia consistente. Escolha uma pasta de saida nova para cada auditoria.
+O script copia o projeto para `SAIDA/project/`; so essa copia recebe alteracoes.
+Nao substitui `.ghidra-exports`, `lf2_decomp.c` ou o banco original.
 
-```bash
-cd /mnt/c/Users/rodrigo.chiesa/Documents/LittleFighter2Vita
-mkdir -p reference/decomp && cd reference/decomp
-
-# 1. ver o nome exato do exe
-ls -la "/mnt/c/Program Files (x86)/LittleFighter/"*.exe
-
-# 2. copiar (ajuste o nome se não for lf2.exe)
-cp "/mnt/c/Program Files (x86)/LittleFighter/lf2.exe" .
-
-# 3. decompilar (com análise agressiva — bem mais funções que o padrão)
-rm -rf lf2proj*
-export LF2_DECOMP_OUT=$PWD/lf2_decomp.c
-~/ghidra/support/analyzeHeadless $PWD lf2proj \
-  -import lf2.exe \
-  -preScript ../../tools/ghidra_pre_aggressive.py \
-  -postScript ../../tools/ghidra_export_c.py \
-  -scriptPath ../../tools \
-  -max-cpu 4 \
-  -deleteProject
+```powershell
+$env:JAVA_HOME = 'C:/Program Files/Microsoft/jdk-21.0.12.8-hotspot'
+$lfAuditOut = 'reference/audit-ghidra-nova'
+.\.venv\Scripts\python.exe tools/ghidra_audit.py --output $lfAuditOut
+.\.venv\Scripts\python.exe tools/lf2_binary_inventory.py --output $lfAuditOut
+.\.venv\Scripts\python.exe tools/ghidra_audit.py --output $lfAuditOut --stage probe --probe
+.\.venv\Scripts\python.exe tools/ghidra_audit.py --output $lfAuditOut --stage enhanced --enhance --fix-callback-conventions --export --supplement
+.\.venv\Scripts\python.exe tools/lf2_verify_ghidra_audit.py $lfAuditOut
 ```
 
-O `-preScript` liga o *Aggressive Instruction Finder* (acha código que a análise
-por referências não alcança) e o *Decompiler Parameter ID*. O `-postScript`
-ainda recupera funções órfãs (desassembla bytes indefinidos no `.text`, promove
-alvos de `call` sem função) antes de decompilar. Esperado: de ~350 para milhares
-de funções; leva bem mais tempo (10-40 min) e o `.c` fica maior.
+`--probe` registra a tentativa normal e outra com limites maiores para
+`0041bc90`, alem de candidatos a entradas orfas. E diagnostico, nao necessario
+para a exportacao. Na auditoria, ambas as tentativas funcionaram: a causa da
+falha da exportacao anterior nao foi reproduzida.
 
-Saída: `reference/decomp/lf2_decomp.c` (dezenas de MB — é normal).
-`reference/` já está no `.gitignore`.
+Os scripts de recuperacao e complemento SEH sao especificos deste binario.
+O SHA256 do programa Ghidra precisa coincidir com o executavel; referencias
+de tabelas e retornos dos callbacks recebem verificacoes adicionais.
 
-## 3. Usar
+## Artefatos
 
-Não é para ler inteiro — é para **grep direcionado**. Exemplos do que procurar
-quando bater dúvida de mecânica:
+- `baseline/`: inventario do banco anterior, lacunas, assembly e constantes.
+- `enhanced/exports/`: JSONs por funcao com C, bytes, referencias a dados,
+  chamadas com endereco da instrucao, P-code e CFG.
+- `enhanced/lf2_recovered.c`: pseudocodigo consolidado.
+- `enhanced/text.asm`: instrucoes reconhecidas, bytes e funcao proprietaria.
+- `enhanced/float_constants.json`: valores candidatos, largura da instrucao
+  e referencias; nao deduz tipos somente pela sequencia de bytes.
+- `enhanced/seh_fragments/`: filtros e handlers contextuais de excecao.
+  As funcoes temporarias usadas para decompila-los sao revertidas.
+- `enhanced/gap_review.json`: classificacao de todas as faixas indefinidas.
+- `binary_inventory.json`: imports, DLLs locais candidatas e manifesto.
+- `verification.json`: verificacao de bytes, limites e hashes preservados.
 
-```bash
-grep -n "0x3fd99999\|1.7"      lf2_decomp.c   # gravidade
-grep -n "== 60\|> 60"          lf2_decomp.c   # KO / falling points
-grep -n "1000\|999"            lf2_decomp.c   # códigos de next
-grep -nA40 "FUN_00417" lf2_decomp.c           # função específica
-```
+O P-code novo usa o modo `decompile` (otimizado); os JSONs antigos usavam
+`normalize`. Comparar contagens de operacoes entre eles nao mede melhoria.
 
-Peça ao Claude para fazer a busca: ele lê o arquivo por grep/sed sem precisar
-carregar tudo no contexto.
+## Exportador C simples
 
-## Notas
+`ghidra_export_c.py` continua sendo um post-script para o Ghidra. Agora usa
+sintaxe Python 3, exporta somente funcoes reconhecidas e registra falhas em
+`ARQUIVO.c.status.json`. Nao desassembla bytes arbitrarios nem promove padding.
 
-- Ghidra não recupera nomes (sem símbolos no exe): as funções saem como
-  `FUN_00401234`. Identifica-se pelo uso de constantes e strings próximas.
-- O `openlf2.exe` do repo de referência é o LF2 com uma DLL de hook injetada;
-  prefira o exe limpo.
-- Alternativa mais leve p/ perguntas pontuais: `objdump -d` + busca por
-  constante (a sandbox do Claude tem objdump/capstone/pefile).
+Variaveis de ambiente: `LF2_DECOMP_OUT` (arquivo C), `LF2_DECOMP_TIMEOUT`
+(padrao 180 segundos por funcao), `LF2_DECOMP_PAYLOAD_MB` (padrao 128),
+`LF2_DECOMP_ADDRESSES` (opcional, enderecos hexadecimais de oito digitos,
+separados por virgula, para uma exportacao direcionada).
+
+O pre-script `ghidra_pre_aggressive.py` descobre candidatos. Quantidade maior
+de funcoes, C maior ou analise agressiva nao sao medidas de fidelidade.
+O procedimento antigo que criava funcoes de todo trecho orfao foi removido.

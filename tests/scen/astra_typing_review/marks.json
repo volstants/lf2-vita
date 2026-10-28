@@ -1,0 +1,45 @@
+{
+ "frames": 272,
+ "marks": [
+  [
+   79,
+   "Tela Control Settings solicitada"
+  ],
+  [
+   109,
+   "Campo nome P1 selecionado"
+  ],
+  [
+   140,
+   "Letras NAME digitadas"
+  ],
+  [
+   146,
+   "END: keypad sem NumLock 1"
+  ],
+  [
+   152,
+   "PageUp: keypad sem NumLock 9"
+  ],
+  [
+   158,
+   "Backspace"
+  ],
+  [
+   214,
+   "ABC ativa teclas de desenvolvedor"
+  ],
+  [
+   220,
+   "F3 solicita tela de criptografia"
+  ],
+  [
+   226,
+   "D escolhe decriptar"
+  ],
+  [
+   246,
+   "Nome ABC digitado sem Enter; nenhum arquivo processado"
+  ]
+ ]
+}

@@ -2,7 +2,7 @@
 # Este arquivo E' versionavel. O .ghidra-exports/ e o reference/ghidra/ nao.
 ghidra:
   install_dir: C:/Ghidra/ghidra_12.1.3_PUBLIC
-  project_dir: C:/Users/rodrigo.chiesa/Documents/LittleFighter2Vita/reference/ghidra
+  project_dir: C:/Users/rodrigo.chiesa/OneDrive/Dev/Projetos/PSVita/ports/Little Fighter 2/reference/ghidra
   project_name: lf2
   program_name: lf2.exe
 

@@ -1,0 +1,41 @@
+{
+ "frames": 2797,
+ "marks": [
+  [
+   641,
+   "kb_3_jabs_dizzy_then_super_punch"
+  ],
+  [
+   849,
+   "kb_jump_attack"
+  ],
+  [
+   1017,
+   "kb_run_attack"
+  ],
+  [
+   1197,
+   "kb_dash_attack"
+  ],
+  [
+   1345,
+   "kb_dragon_punch"
+  ],
+  [
+   1521,
+   "kb_energy_blast"
+  ],
+  [
+   1655,
+   "kb_whirlwind_kick_on_davis"
+  ],
+  [
+   1872,
+   "kb_catch_and_throw"
+  ],
+  [
+   2674,
+   "kb_defended_combo"
+  ]
+ ]
+}

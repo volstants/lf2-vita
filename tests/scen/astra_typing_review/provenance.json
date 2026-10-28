@@ -1,0 +1,5 @@
+{
+  "evidence": "li no arquivo private/src/menu_frame_controls.c e private/src/winmain.c",
+  "design": "Mensagens novas, construidas por leitura das coordenadas e da sequencia ABC/F3. Alcance real e equivalencia ainda precisam ser medidos.",
+  "screen_expected": "Nome P1; ferramentas de desenvolvimento sem Enter; nenhuma criptografia/descriptografia executada"
+}

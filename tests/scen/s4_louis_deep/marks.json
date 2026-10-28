@@ -1,0 +1,45 @@
+{
+ "frames": 2175,
+ "marks": [
+  [
+   737,
+   "louis_D>A_blastpush"
+  ],
+  [
+   892,
+   "louis_D>J_1000foot"
+  ],
+  [
+   1024,
+   "louis_D^J_r_catch"
+  ],
+  [
+   1165,
+   "louis_DJA_transform_to_louisEX"
+  ],
+  [
+   1365,
+   "louisEX_D>A_air_push"
+  ],
+  [
+   1534,
+   "louisEX_DvA_up_spear"
+  ],
+  [
+   1679,
+   "louisEX_combo"
+  ],
+  [
+   1815,
+   "deep_D>A_blast"
+  ],
+  [
+   1950,
+   "deep_DvA_jump_sword"
+  ],
+  [
+   2054,
+   "deep_D>J_dash_sword"
+  ]
+ ]
+}

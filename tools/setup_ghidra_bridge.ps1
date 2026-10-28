@@ -433,10 +433,20 @@ if ($SkipAnalysis) {
         $pgArgs = @('-m', 'pyghidra.ghidra_launch', '--install-dir', $GhidraDir,
                     'ghidra.app.util.headless.AnalyzeHeadless') +
                   $hlArgs + @('-preScript', 'ghidra_pre_aggressive.py', '-scriptPath', $ScriptPath)
-        & $VenvPy @pgArgs
-        if ($LASTEXITCODE -eq 0 -and (Test-Path $gprPath)) {
+        # ARMADILHA: o pyghidra sai com codigo 0 mesmo quando o -preScript morre.
+        # Foi assim que um SyntaxError de Python 2 passou despercebido e a analise
+        # seguiu no modo PADRAO reportando sucesso. Checar a SAIDA, nao so' o
+        # codigo de retorno.
+        $pgOut = (& $VenvPy @pgArgs 2>&1 | Tee-Object -Variable pgLines | Out-String)
+        $scriptFalhou = ($pgOut -match 'SCRIPT ERROR|GhidraScriptLoadException|SyntaxError')
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $gprPath) -and -not $scriptFalhou) {
             $done = $true
             Ok "analise agressiva concluida"
+        } elseif ($scriptFalhou) {
+            Warn "o -preScript FALHOU (veja SCRIPT ERROR acima). O projeto foi"
+            Warn "analisado, mas no modo PADRAO: espere ~350 funcoes, nao milhares."
+            Warn "Corrija tools/ghidra_pre_aggressive.py e rode com -Reanalyze."
+            $done = $true
         } else {
             Warn "pyghidra.ghidra_launch falhou (codigo $LASTEXITCODE)."
             Warn "Caindo para analyzeHeadless.bat SEM o preScript: menos funcoes."
@@ -521,8 +531,10 @@ try {
     Info "containing $SmokeAddr  - deve cair na rotina de aplicacao de acerto"
     & $Bridge containing $SmokeAddr
     Write-Host ""
-    Info "decompile $SmokeAddr"
-    & $Bridge decompile $SmokeAddr
+    # `decompile` e `xrefs-to` so' aceitam INICIO de funcao. 0x0042ea8c e'
+    # endereco de instrucao no meio de FUN_0042e100; para ele, use `containing`.
+    Info "decompile 0x0042e100 (a funcao que contem $SmokeAddr)"
+    & $Bridge decompile 0x0042e100
     Write-Host ""
     Warn "LEIA a saida acima. O campo fall deve saturar no piso da faixa"
     Warn "(60/40/20), nao acumular livre. Se o pseudocodigo disser outra coisa,"

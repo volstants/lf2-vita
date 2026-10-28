@@ -1,0 +1,49 @@
+{
+ "frames": 2649,
+ "marks": [
+  [
+   674,
+   "freeze_D>A_iceball_frozen"
+  ],
+  [
+   723,
+   "woody_frozen_then_hit_hard"
+  ],
+  [
+   892,
+   "freeze_D^J_whirlwind_lift"
+  ],
+  [
+   1100,
+   "freeze_DvJ_ice_sword"
+  ],
+  [
+   1199,
+   "freeze_sword_attacks"
+  ],
+  [
+   1392,
+   "freeze_D>J_down_punch_ice_column"
+  ],
+  [
+   1632,
+   "woody_D>A_ball"
+  ],
+  [
+   1783,
+   "woody_DvA_cleg"
+  ],
+  [
+   2293,
+   "woody_D>J_fly_crash"
+  ],
+  [
+   2432,
+   "woody_D^J_teleport_behind"
+  ],
+  [
+   2558,
+   "woody_DvJ_teleport_ally"
+  ]
+ ]
+}

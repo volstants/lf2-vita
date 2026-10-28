@@ -1,0 +1,12 @@
+# Required scenarios of the acceptance suite (tools/scen/check_suite.py).
+# Each needs events.txt, marks.json and oracle_hash.log. A missing file fails
+# the suite; removing a line here is a deliberate, reviewable change.
+s1_davis_firen
+s2_freeze_woody
+s3_rudolf_john
+s4_louis_deep
+s5_henry_dennis
+s6_firzen_julian
+s7_knockback
+s8_chaos
+s9_stage

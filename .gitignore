@@ -11,6 +11,9 @@ bg/
 reference/
 
 # ── Build artifacts ──────────────────────────────────────────────────────────
+# BUILD/ = official VPKs (kept locally, not versioned); .build/ = intermediates
+/BUILD/
+/.build/
 build/
 build-out/
 cmake-build-*/
@@ -47,3 +50,17 @@ assets/
 reference/ghidra/
 .venv/
 ghidra-bridge.yaml.bak
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Codigo descompilado do lf2.exe (fase 2): derivado do exe, NUNCA no GitHub
+# (versionar num repositorio local/privado fora do GitHub)
+private/
+
+# Saves do build de desktop
+lf2save/
+
+# Conversas e documentos locais de apoio
+/Claude outputs/

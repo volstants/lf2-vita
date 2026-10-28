@@ -1,0 +1,46 @@
+# Host build of the recompiled lf2.exe (tests / oracle comparison).
+#   intermediates go to .build/ (BUILD/ holds only the official VPKs)
+#   make -f Makefile.recomp            -> bin/lf2-recomp-test
+GEN     := .build/recomp
+CC      ?= gcc
+CXX     ?= g++
+CFLAGS  ?= -O2 -g -fno-strict-aliasing -w
+CXXFLAGS?= -O2 -g -std=c++17 -Wall -Wno-unused-function
+INC     := -I src/recomp -I $(GEN)
+LF2_EXE ?= reference/decomp/lf2.exe
+# The list of generated files is only known after emit.py ran: the emit rule
+# writes it to files.mk, which make builds first and then re-reads (so a clean
+# checkout builds in one go).
+include $(GEN)/files.mk
+GENOBJ   = $(patsubst $(GEN)/%.c,.build/recomp-obj/%.o,$(GENSRC))
+RTSRC   := src/recomp/rt_core.cpp src/recomp/win32_api.cpp src/recomp/win32_dx.cpp
+RTOBJ   := $(patsubst src/recomp/%.cpp,.build/recomp-obj/%.o,$(RTSRC))
+
+bin/lf2-recomp-test: $(GENOBJ) $(RTOBJ) .build/recomp-obj/host_test.o
+	@mkdir -p bin
+	$(CXX) -o $@ $^ -lm
+
+# every generated file is rewritten together with lf2_dispatch.c: depend on it
+# so a parallel make never compiles a stale translation
+.build/recomp-obj/%.o: $(GEN)/%.c $(GEN)/lf2_dispatch.c src/recomp/recomp_rt.h
+	@mkdir -p .build/recomp-obj
+	$(CC) $(CFLAGS) $(INC) -c $< -o $@
+
+.build/recomp-obj/%.o: src/recomp/%.cpp src/recomp/*.hpp src/recomp/*.h
+	@mkdir -p .build/recomp-obj
+	$(CXX) $(CXXFLAGS) $(INC) -c $< -o $@
+
+.build/recomp-obj/lf2_image.o: $(GEN)/lf2_dispatch.c
+	@mkdir -p .build/recomp-obj
+	$(CC) -c $(GEN)/lf2_image.S -o $@
+
+$(GEN)/files.mk: tools/recomp/emit.py tools/recomp/analyze.py tools/recomp/lf2_seeds.txt $(LF2_EXE)
+	LF2_EXE="$(LF2_EXE)" python3 tools/recomp/emit.py $(GEN)
+	@printf 'GENSRC := %s $(GEN)/lf2_dispatch.c\n' "$$(cd . && ls $(GEN)/lf2_gen_*.c | tr '\n' ' ')" > $@
+$(GEN)/lf2_dispatch.c $(GEN)/lf2_image.S: $(GEN)/files.mk
+
+# Desktop SDL build (play the recompiled game on Linux)
+SDLOBJ := .build/recomp-obj/host_sdl.o .build/recomp-obj/lf2_image.o
+bin/lf2-recomp: $(GENOBJ) $(RTOBJ) $(SDLOBJ)
+	@mkdir -p bin
+	$(CXX) -o $@ $^ -lSDL2 -lSDL2_mixer -lm

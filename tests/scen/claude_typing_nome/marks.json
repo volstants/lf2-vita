@@ -1,0 +1,25 @@
+{
+ "frames": 289,
+ "marks": [
+  [
+   112,
+   "Campo nome P1 selecionado"
+  ],
+  [
+   138,
+   "Backspace ate esvaziar e uma vez a mais"
+  ],
+  [
+   198,
+   "X + End PageUp Home Left Up Right Down PageDown Insert: nome com 10 caracteres"
+  ],
+  [
+   222,
+   "Clear recusado com nome cheio, Backspace, Clear aceito, Enter ignorado"
+  ],
+  [
+   272,
+   "Nome P2: End, Z, 0, PageUp, Backspace"
+  ]
+ ]
+}
